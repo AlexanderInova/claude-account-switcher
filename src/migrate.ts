@@ -107,7 +107,8 @@ export async function migrateIfNeeded(
           file.account.subscriptionType = creds!.subscriptionType;
         }
         store.writeAccount(file);
-        if (p.lastUsage) {
+        // Seed usage only if the shared store has none yet — never clobber fresher data.
+        if (p.lastUsage && !store.readUsage(uuid)) {
           store.writeUsage(uuid, {
             rev: 0,
             updatedAt: 0,
@@ -147,7 +148,7 @@ export async function migrateIfNeeded(
           });
         }
         store.writeAccount(file);
-        if (p.lastUsage) {
+        if (p.lastUsage && !store.readUsage(uuid)) {
           store.writeUsage(uuid, {
             rev: 0,
             updatedAt: 0,

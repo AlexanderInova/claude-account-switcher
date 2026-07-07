@@ -342,6 +342,20 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     })
   );
+
+  // When this window regains focus, reconcile immediately: a backgrounded window's
+  // tick may have been throttled, so its cached view (and the store) can be stale.
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState((state) => {
+      if (!state.focused) {
+        return;
+      }
+      if (accountStore.reload(Date.now())) {
+        refreshUI();
+      }
+      void poller.tick(false);
+    })
+  );
 }
 
 export function deactivate(): void {

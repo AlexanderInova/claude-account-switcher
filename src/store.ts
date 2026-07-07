@@ -53,11 +53,21 @@ export class SharedStore {
   }
 
   private readJson<T>(p: string): T | null {
-    try {
-      return JSON.parse(fs.readFileSync(p, "utf8")) as T;
-    } catch {
-      return null;
+    // Retry once: a read can rarely race an atomic replace on some container mounts.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return JSON.parse(fs.readFileSync(p, "utf8")) as T;
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+          return null; // genuinely absent — no point retrying
+        }
+        if (attempt === 0) {
+          continue;
+        }
+        return null;
+      }
     }
+    return null;
   }
 
   // --- account files ---
@@ -132,10 +142,27 @@ export class SharedStore {
     return this.readJson<UsageFile>(this.usagePath(uuid));
   }
 
+  /**
+   * Writes a usage file, but never regresses and never downgrades to older data.
+   * All callers hold the per-account lock, so this read-modify-write is safe.
+   *
+   * - `rev` is always derived from what is on disk, so it can never run backwards.
+   * - If the on-disk snapshot has a strictly newer `fetchedAt` than the incoming one,
+   *   the on-disk snapshot is kept (a stale/empty snapshot can't clobber a fresh one);
+   *   only `lastAttemptAt` advances. Equal `fetchedAt` (error/claim bookkeeping writes)
+   *   still applies. Containers share one host clock, so `fetchedAt` is a safe key.
+   */
   writeUsage(uuid: string, file: UsageFile): void {
-    file.rev = (file.rev ?? 0) + 1;
-    file.updatedAt = Date.now();
-    this.writeJson(this.usagePath(uuid), file);
+    const current = this.readUsage(uuid);
+    const keepCurrent =
+      !!current && current.snapshot.fetchedAt > (file.snapshot?.fetchedAt ?? 0);
+    const merged: UsageFile = {
+      rev: (current?.rev ?? 0) + 1,
+      updatedAt: Date.now(),
+      lastAttemptAt: Math.max(current?.lastAttemptAt ?? 0, file.lastAttemptAt ?? 0),
+      snapshot: keepCurrent ? current!.snapshot : file.snapshot,
+    };
+    this.writeJson(this.usagePath(uuid), merged);
   }
 
   // --- global 429 cooldown ---
