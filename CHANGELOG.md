@@ -45,6 +45,9 @@ Reworked for running many windows/devcontainers at once.
   invalid)" probes every parked credential and permanently removes the ones that are definitively
   invalid (401/403 on use, or `invalid_grant` on refresh). Transient failures (429/network/5xx) are
   never dropped; it stops early on a rate limit and never touches the credential in use in this window.
+- **Status bar shows the weekly limit too.** The active account now displays both the 5h session and
+  the weekly usage (e.g. `2% | 44%`), and the status bar turns amber when *either* crosses the warning
+  threshold — so an account that's free on 5h but exhausted weekly no longer looks available.
 - **Fixed stale usage flicker.** Concurrent windows could momentarily overwrite an account's usage
   with an older or empty snapshot (the file's revision could even run backwards), so wrong/earlier
   values appeared until the next refresh. Usage writes are now monotonic — an older or empty snapshot
