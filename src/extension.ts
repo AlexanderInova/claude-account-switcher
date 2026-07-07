@@ -104,7 +104,8 @@ export function activate(context: vscode.ExtensionContext): void {
     getWorkspaceName,
     () => vscode.workspace.getConfiguration("claudeSwitcher").get<number>("pollIntervalSeconds", 240),
     () => vscode.workspace.getConfiguration("claudeSwitcher").get<boolean>("autoSuspend", true),
-    refreshUI
+    refreshUI,
+    () => switchService.ensureLocalAccountRegistered()
   );
 
   context.subscriptions.push(
@@ -137,6 +138,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (store) {
         await migrateIfNeeded(context, store, vault, credentials, identity);
         await switchService.recoverPendingDeploy();
+        await switchService.ensureLocalAccountRegistered();
       }
     } catch (e) {
       console.error("claudeSwitcher: startup migration/recovery failed", e);

@@ -80,6 +80,39 @@ export class SwitchService {
   }
 
   /**
+   * Ensures the account currently logged in *locally* has a metadata entry in the
+   * store (with zero parked credentials — the live credential stays in the file),
+   * so its usage is polled and it shows up as a card. No-op if there is no local
+   * login, its identity can't be resolved, or it is already registered.
+   *
+   * Returns true if it created a new entry (caller should reload + refresh the UI).
+   */
+  async ensureLocalAccountRegistered(): Promise<boolean> {
+    if (!this.store) {
+      return false;
+    }
+    const creds = this.credentials.readCurrent();
+    if (!creds) {
+      return false;
+    }
+    const ident = await this.identify(creds);
+    const uuid = ident?.accountUuid;
+    if (!uuid || this.store.readAccount(uuid)) {
+      return false;
+    }
+    const label = ident?.emailAddress ?? (creds.subscriptionType ? `${creds.subscriptionType} account` : "Current account");
+    const order = this.store.listAccounts().length;
+    const created = await this.store.withAccountLock(uuid, () => {
+      if (this.store!.readAccount(uuid)) {
+        return false; // another window registered it first
+      }
+      this.store!.writeAccount(newAccountFile(uuid, label, ident, creds, order));
+      return true;
+    });
+    return created === true;
+  }
+
+  /**
    * Parks the current live credential into the pool and signs the local Claude
    * Code out. `silent` auto-labels a new account instead of prompting.
    */

@@ -28,6 +28,10 @@ Reworked for running many windows/devcontainers at once.
   extension refreshes only credentials it exclusively owns.
 - **Removed** the `.bak` undo mechanism (undo is now "switch back") and the old per-profile
   globalState storage (migrated automatically on first launch).
+- **Usage for the account currently in use.** The account logged in to a window is auto-registered
+  (metadata only; its live credential is not parked) so its usage is polled and it appears as a card
+  in every window. If its identity can't be determined, a display-only "unsaved" card still shows
+  its usage, with a **Park to save** action.
 
 ## 0.1.0
 

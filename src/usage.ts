@@ -205,7 +205,9 @@ export class UsagePoller {
     private readonly getWorkspaceName: () => string,
     private readonly getIntervalSeconds: () => number,
     private readonly getAutoSuspend: () => boolean,
-    private readonly onUpdate: () => void
+    private readonly onUpdate: () => void,
+    /** Registers the locally logged-in account if it isn't in the store yet. */
+    private readonly ensureLocalRegistered: () => Promise<boolean>
   ) {}
 
   start(): void {
@@ -249,7 +251,16 @@ export class UsagePoller {
       const now = Date.now();
       this.heartbeat(now);
 
-      if (this.accountStore.reload(now)) {
+      // Auto-register the account logged in locally (if its identity is known and it
+      // isn't stored yet) so its usage is polled and it shows up everywhere.
+      const registered = await this.ensureLocalRegistered();
+      const changed = this.accountStore.reload(now);
+      if (registered) {
+        // The account now exists in the map, so active detection can match it even
+        // though the credentials file's mtime didn't change.
+        this.accountStore.recomputeActive();
+      }
+      if (changed || registered) {
         this.onUpdate();
       }
 
@@ -259,6 +270,12 @@ export class UsagePoller {
 
       for (const uuid of this.store.listAccountUuids()) {
         await this.pollAccount(uuid, force);
+      }
+
+      // Identity-unknown fallback: a local login we couldn't name gets no account
+      // file, so poll it directly into the ephemeral local-usage cache.
+      if (this.credentials.readCurrent() && !this.accountStore.activeAccountUuid()) {
+        await this.pollLocalOnly(force);
       }
       this.onUpdate();
     } finally {

@@ -24,6 +24,7 @@ interface ViewAccount {
   error?: string;
   errorAt?: number;
   fetchedAt?: number;
+  ephemeral?: boolean;
 }
 
 /** Activity bar panel: list of accounts with usage limits and actions. */
@@ -101,6 +102,7 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
       error: v.lastUsage?.error,
       errorAt: v.lastUsage?.errorAt,
       fetchedAt: v.lastUsage?.fetchedAt,
+      ephemeral: v.ephemeral,
     }));
 
     const warnThreshold = vscode.workspace

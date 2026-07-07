@@ -166,9 +166,14 @@ export class AccountStore {
       return this.localOnlyViews();
     }
     const others = this.instances.filter((i) => i.instanceId !== this.instanceId);
-    return [...this.accounts.values()]
-      .map((f) => this.toView(f, others))
-      .sort((a, b) => a.order - b.order);
+    const views = [...this.accounts.values()].map((f) => this.toView(f, others));
+    // A local login we couldn't register (identity unknown) still shows its usage.
+    if (!this.activeUuid && this.credentials.readCurrent()) {
+      views.push(this.ephemeralView());
+    }
+    // Active account first, then by explicit order.
+    views.sort((a, b) => Number(b.isActive) - Number(a.isActive) || a.order - b.order);
+    return views;
   }
 
   private toView(f: AccountFile, others: InstanceInfo[]): AccountView {
@@ -194,25 +199,26 @@ export class AccountStore {
 
   /** In no-store mode, surface just the locally logged-in account (if any). */
   private localOnlyViews(): AccountView[] {
+    return this.credentials.readCurrent() ? [this.ephemeralView()] : [];
+  }
+
+  /** A display-only card for the current local login (used by both modes). */
+  private ephemeralView(): AccountView {
     const ident = this.activeIdent;
-    if (!ident) {
-      return [];
-    }
-    return [
-      {
-        uuid: ident.accountUuid,
-        email: ident.emailAddress,
-        label: ident.emailAddress ?? "Current account",
-        order: 0,
-        subscriptionType: undefined,
-        updatesEnabled: true,
-        suspended: undefined,
-        parkedCount: 0,
-        invalidCount: 0,
-        lastUsage: this.localUsage(),
-        isActive: true,
-        inUseByOthers: [],
-      },
-    ];
+    return {
+      uuid: ident?.accountUuid ?? "__local__",
+      email: ident?.emailAddress,
+      label: ident?.emailAddress ?? "Current account (unsaved)",
+      order: Number.MAX_SAFE_INTEGER,
+      subscriptionType: undefined,
+      updatesEnabled: true,
+      suspended: undefined,
+      parkedCount: 0,
+      invalidCount: 0,
+      lastUsage: this.localUsage(),
+      isActive: true,
+      inUseByOthers: [],
+      ephemeral: true,
+    };
   }
 }

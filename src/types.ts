@@ -149,4 +149,9 @@ export interface AccountView {
   isActive: boolean;
   /** workspace names of other live instances where this account is deployed */
   inUseByOthers: string[];
+  /**
+   * A display-only card for a local login not backed by a stored account (identity
+   * unknown, or no shared store). Usage shows, but switch/rename/remove/pause don't.
+   */
+  ephemeral?: boolean;
 }

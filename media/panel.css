@@ -154,7 +154,9 @@ button:disabled {
 .bar {
   height: 6px;
   border-radius: 4px;
-  background: var(--vscode-progressBar-background, rgba(128, 128, 128, 0.25));
+  /* Neutral, low-saturation track so the colored fill has high contrast against it
+     (the theme progress-bar color is often a saturated blue that competes with it). */
+  background: rgba(127, 127, 127, 0.25);
   overflow: hidden;
 }
 

@@ -114,7 +114,10 @@
     } else if (acc.subscriptionType) {
       title.appendChild(badge(acc.subscriptionType));
     }
-    if (!acc.updatesEnabled) {
+    if (acc.ephemeral) {
+      title.appendChild(badge("not saved", "paused", "Logged in here but not parked. Park it to switch to it from other windows."));
+    }
+    if (!acc.ephemeral && !acc.updatesEnabled) {
       title.appendChild(badge("paused", "paused", "Automatic usage updates are paused"));
     }
     if (acc.suspendedReason === "rate-limit") {
@@ -128,34 +131,40 @@
 
     const headBtns = document.createElement("div");
     headBtns.className = "head-btns";
+    if (!acc.ephemeral) {
+      headBtns.appendChild(
+        iconButton(acc.updatesEnabled ? "⏸" : "▶", acc.updatesEnabled ? "Pause usage updates" : "Resume usage updates", () =>
+          vscode.postMessage({ type: "togglePause", id: acc.id })
+        )
+      );
+    }
     headBtns.appendChild(
-      iconButton(acc.updatesEnabled ? "⏸" : "▶", acc.updatesEnabled ? "Pause usage updates" : "Resume usage updates", () =>
-        vscode.postMessage({ type: "togglePause", id: acc.id })
+      iconButton("⟳", "Refresh usage limits", () =>
+        vscode.postMessage(acc.ephemeral ? { type: "refreshAll" } : { type: "refresh", id: acc.id })
       )
-    );
-    headBtns.appendChild(
-      iconButton("⟳", "Refresh usage limits", () => vscode.postMessage({ type: "refresh", id: acc.id }))
     );
     head.appendChild(headBtns);
     el.appendChild(head);
 
-    // Parked / in-use chips.
-    const chips = document.createElement("div");
-    chips.className = "chips";
-    const parkedChip = document.createElement("span");
-    parkedChip.className = "chip";
-    parkedChip.textContent = `⛁ ${acc.parkedCount} parked`;
-    if (acc.invalidCount) parkedChip.textContent += ` · ${acc.invalidCount} invalid`;
-    parkedChip.title = "Parked credentials available for switching";
-    chips.appendChild(parkedChip);
-    if (acc.inUseByOthers && acc.inUseByOthers.length) {
-      const useChip = document.createElement("span");
-      useChip.className = "chip";
-      useChip.textContent = `in use: ${acc.inUseByOthers.join(", ")}`;
-      useChip.title = "Windows where this account is currently deployed";
-      chips.appendChild(useChip);
+    // Parked / in-use chips (not shown for the unsaved local card).
+    if (!acc.ephemeral) {
+      const chips = document.createElement("div");
+      chips.className = "chips";
+      const parkedChip = document.createElement("span");
+      parkedChip.className = "chip";
+      parkedChip.textContent = `⛁ ${acc.parkedCount} parked`;
+      if (acc.invalidCount) parkedChip.textContent += ` · ${acc.invalidCount} invalid`;
+      parkedChip.title = "Parked credentials available for switching";
+      chips.appendChild(parkedChip);
+      if (acc.inUseByOthers && acc.inUseByOthers.length) {
+        const useChip = document.createElement("span");
+        useChip.className = "chip";
+        useChip.textContent = `in use: ${acc.inUseByOthers.join(", ")}`;
+        useChip.title = "Windows where this account is currently deployed";
+        chips.appendChild(useChip);
+      }
+      el.appendChild(chips);
     }
-    el.appendChild(chips);
 
     if (acc.windows && acc.windows.length) {
       for (const w of acc.windows) {
@@ -184,6 +193,16 @@
 
     const actions = document.createElement("div");
     actions.className = "actions";
+    if (acc.ephemeral) {
+      const park = document.createElement("button");
+      park.className = "primary";
+      park.textContent = "Park to save";
+      park.title = "Save this account into the pool (signs out here)";
+      park.addEventListener("click", () => vscode.postMessage({ type: "add" }));
+      actions.appendChild(park);
+      el.appendChild(actions);
+      return el;
+    }
     if (!acc.isActive) {
       const sw = document.createElement("button");
       sw.className = "primary";
