@@ -385,6 +385,65 @@ export class SwitchService {
     this.accountStore.reload(Date.now());
   }
 
+  /**
+   * Deletes the credential live in *this* window (signs Claude Code out here). Leaves
+   * any parked credentials for the account intact; if none remain, removes the now-empty
+   * account entry. No live credential is left, so auto-register won't recreate it.
+   */
+  async deleteLocalCredential(uuid: string): Promise<OpResult> {
+    if (!this.store) {
+      return this.noStore();
+    }
+    if (this.accountStore.activeAccountUuid() !== uuid) {
+      return { ok: false, message: "That account is not active in this window." };
+    }
+    this.credentials.clearLocal();
+    this.identity.writeLocalIdentity(null);
+    await this.accountStore.clearActive();
+
+    const file = this.store.readAccount(uuid);
+    const label = file?.account.label ?? uuid;
+    if (file && file.credentials.length === 0) {
+      this.store.deleteAccount(uuid);
+    }
+    this.accountStore.reload(Date.now());
+    return {
+      ok: true,
+      message: `Deleted the local credential for "${label}". Signed out of Claude Code in this window.`,
+      needsReload: true,
+    };
+  }
+
+  /**
+   * Deletes all parked (pooled) credentials for the account, keeping it logged in
+   * locally. The account entry is kept (it is still active here).
+   */
+  async deleteParked(uuid: string): Promise<OpResult> {
+    if (!this.store) {
+      return this.noStore();
+    }
+    const label = this.store.readAccount(uuid)?.account.label ?? uuid;
+    let ids: string[] = [];
+    await this.store.withAccountLock(uuid, () => {
+      const f = this.store!.readAccount(uuid);
+      if (!f) {
+        return;
+      }
+      ids = f.credentials.map((c) => c.id);
+      f.credentials = [];
+      if (f.account.suspended?.reason === "invalid-grant") {
+        f.account.suspended = undefined;
+      }
+      this.store!.writeAccount(f);
+    });
+    // Refs are cleared first, so no poller will lease a vanishing blob.
+    for (const id of ids) {
+      await this.vault.remove(id);
+    }
+    this.accountStore.reload(Date.now());
+    return { ok: true, message: `Deleted ${ids.length} parked credential${ids.length === 1 ? "" : "s"} for "${label}".` };
+  }
+
   async toggleUpdates(uuid: string): Promise<boolean> {
     if (!this.store) {
       return true;

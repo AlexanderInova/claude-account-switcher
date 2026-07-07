@@ -32,6 +32,11 @@ Reworked for running many windows/devcontainers at once.
   (metadata only; its live credential is not parked) so its usage is polled and it appears as a card
   in every window. If its identity can't be determined, a display-only "unsaved" card still shows
   its usage, with a **Park to save** action.
+- **Smarter delete.** Deleting the active account now asks whether to remove the credential live in
+  this window (signs out here) or the parked ones (only asked when parked credentials exist), each
+  behind a confirmation. Deleting the local credential no longer silently reappears on the next poll.
+- **UI polish.** The active account is always listed first, and usage bars use a neutral track so the
+  green/amber/red fill stays legible in both light and dark themes.
 
 ## 0.1.0
 

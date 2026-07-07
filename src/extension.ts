@@ -207,12 +207,58 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const view = accountStore.listViews().find((v) => v.uuid === targetId);
-      const confirm = await vscode.window.showWarningMessage(
-        `Remove the profile "${view?.label ?? targetId}"? Parked credentials for it are deleted; accounts deployed in other windows are untouched.`,
-        { modal: true },
-        "Remove"
-      );
-      if (confirm === "Remove") {
+      const label = view?.label ?? targetId;
+      const stored = (view?.parkedCount ?? 0) + (view?.invalidCount ?? 0);
+
+      const confirmDelete = async (detail: string): Promise<boolean> =>
+        (await vscode.window.showWarningMessage(detail, { modal: true }, "Delete")) === "Delete";
+
+      // Active account: distinguish the credential live in this window from the pooled ones.
+      if (view?.isActive) {
+        let deleteLocal = true;
+        if (stored > 0) {
+          const localPick = `Local credential (sign out here)`;
+          const parkedPick = `Parked credentials (${stored})`;
+          const pick = await vscode.window.showQuickPick(
+            [
+              { label: localPick, detail: `Removes the credential in use in this window; keeps the ${stored} parked.` },
+              { label: parkedPick, detail: "Deletes the pooled credentials; this window stays logged in." },
+            ],
+            { title: `Delete for "${label}"`, placeHolder: "What do you want to delete?" }
+          );
+          if (!pick) {
+            return;
+          }
+          deleteLocal = pick.label === localPick;
+        }
+
+        let res;
+        if (deleteLocal) {
+          if (!(await confirmDelete(`Delete the local credential for "${label}" and sign out of Claude Code in this window?`))) {
+            return;
+          }
+          res = await switchService.deleteLocalCredential(targetId);
+        } else {
+          if (!(await confirmDelete(`Delete the ${stored} parked credential${stored === 1 ? "" : "s"} for "${label}"? This window stays logged in.`))) {
+            return;
+          }
+          res = await switchService.deleteParked(targetId);
+        }
+        refreshUI();
+        if (res && !res.ok) {
+          vscode.window.showWarningMessage(res.message);
+        } else if (res?.needsReload) {
+          await switchService.maybeReload(res.message);
+        }
+        return;
+      }
+
+      // Not active here: delete the whole profile (account entry + parked credentials).
+      if (
+        await confirmDelete(
+          `Remove the profile "${label}"? Its ${stored} parked credential${stored === 1 ? "" : "s"} ${stored === 1 ? "is" : "are"} deleted; accounts deployed in other windows are untouched.`
+        )
+      ) {
         await switchService.remove(targetId);
         refreshUI();
       }
