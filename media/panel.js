@@ -47,6 +47,13 @@
     return `${prefix} ${h}h ${m % 60}m ago`;
   }
 
+  // Absolute local time for tooltips (accepts an ISO string or epoch ms).
+  function fmtAbsolute(v) {
+    if (!v) return "";
+    const d = new Date(v);
+    return isNaN(d.getTime()) ? "" : d.toLocaleString();
+  }
+
   function meter(w, warn) {
     const cls = w.percent >= warn ? "danger" : w.percent >= warn * 0.75 ? "warn" : "";
     const wrap = document.createElement("div");
@@ -73,6 +80,8 @@
       const r = document.createElement("div");
       r.className = "reset";
       r.textContent = reset;
+      const abs = fmtAbsolute(w.resetsAt);
+      if (abs) r.title = "Resets at " + abs;
       wrap.appendChild(r);
     }
     return wrap;
@@ -189,6 +198,8 @@
     foot.className = "sub";
     foot.style.marginTop = "6px";
     foot.textContent = acc.error ? fmtAgo(acc.fetchedAt, "data from") : fmtAgo(acc.fetchedAt, "updated");
+    const absFetched = fmtAbsolute(acc.fetchedAt);
+    if (absFetched) foot.title = "Last successful update: " + absFetched;
     el.appendChild(foot);
 
     const actions = document.createElement("div");
