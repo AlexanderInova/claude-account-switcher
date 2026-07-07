@@ -4,6 +4,11 @@
 
 Reworked for running many windows/devcontainers at once.
 
+- **Fixed "Switch" silently doing nothing.** When `~/.claude/.credentials.json` (or `~/.claude.json`)
+  is a bind-mounted single file, the atomic `rename`-based write can't replace the mount point and
+  threw — aborting the switch with no feedback. Writes now fall back to an in-place write when a
+  rename isn't possible, and the Switch command surfaces any error instead of failing silently.
+
 - **Credential pool model.** Accounts and credentials are now separate: an account can hold several
   credentials, which are either *live* in one window or *parked* (idle) in a shared pool — never
   both. "Save current account" became **Park current credential** (moves the live credential into

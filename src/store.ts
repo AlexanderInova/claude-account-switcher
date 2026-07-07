@@ -1,6 +1,6 @@
-import * as crypto from "crypto";
 import * as fs from "fs";
 import * as path from "path";
+import { writeFileAtomic } from "./atomicWrite";
 import { AccountFile, InstanceInfo, UsageFile } from "./types";
 import { withLock } from "./lockFile";
 
@@ -47,9 +47,7 @@ export class SharedStore {
   // --- atomic JSON IO ---
 
   private writeJson(p: string, obj: unknown): void {
-    const tmp = p + ".tmp-" + process.pid + "-" + crypto.randomBytes(3).toString("hex");
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tmp, p);
+    writeFileAtomic(p, JSON.stringify(obj, null, 2));
   }
 
   private readJson<T>(p: string): T | null {

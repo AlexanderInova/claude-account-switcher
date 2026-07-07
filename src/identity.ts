@@ -1,5 +1,6 @@
 import * as fs from "fs";
 import * as path from "path";
+import { writeFileAtomic } from "./atomicWrite";
 import { OAuthAccountInfo } from "./types";
 
 const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
@@ -61,9 +62,7 @@ export class IdentityManager {
       delete obj.oauthAccount;
     }
     try {
-      const tmp = p + ".tmp-" + process.pid;
-      fs.writeFileSync(tmp, JSON.stringify(obj, null, 2), { encoding: "utf8", mode: 0o600 });
-      fs.renameSync(tmp, p);
+      writeFileAtomic(p, JSON.stringify(obj, null, 2));
     } catch {
       /* best-effort */
     }

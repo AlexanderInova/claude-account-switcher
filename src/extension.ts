@@ -175,16 +175,22 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.switchAccount", async (id?: string) => {
-      const targetId = id ?? (await pickAccount(accountStore, "Switch to account…"));
-      if (!targetId) {
-        return;
-      }
-      const res = await switchService.switchTo(targetId);
-      refreshUI();
-      if (!res.ok) {
-        vscode.window.showWarningMessage(res.message);
-      } else if (res.needsReload) {
-        await switchService.maybeReload(res.message);
+      try {
+        const targetId = id ?? (await pickAccount(accountStore, "Switch to account…"));
+        if (!targetId) {
+          return;
+        }
+        const res = await switchService.switchTo(targetId);
+        refreshUI();
+        if (!res.ok) {
+          vscode.window.showWarningMessage(res.message);
+        } else if (res.needsReload) {
+          await switchService.maybeReload(res.message);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("claudeSwitcher: switchAccount failed", e);
+        void vscode.window.showErrorMessage("Claude Account Switcher: switch failed — " + msg);
       }
     })
   );

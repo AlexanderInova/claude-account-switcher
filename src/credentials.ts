@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
+import { writeFileAtomic } from "./atomicWrite";
 import { CredentialsFile, OAuthCreds } from "./types";
 
 /**
@@ -93,13 +94,6 @@ export class CredentialsManager {
   }
 
   private atomicWrite(p: string, json: string): void {
-    const tmp = p + ".tmp-" + process.pid;
-    fs.writeFileSync(tmp, json, { encoding: "utf8", mode: 0o600 });
-    fs.renameSync(tmp, p);
-    try {
-      fs.chmodSync(p, 0o600);
-    } catch {
-      /* best-effort on Windows */
-    }
+    writeFileAtomic(p, json);
   }
 }
