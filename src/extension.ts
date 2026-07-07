@@ -1,5 +1,6 @@
 import * as crypto from "crypto";
 import * as fs from "fs";
+import * as os from "os";
 import * as path from "path";
 import * as vscode from "vscode";
 import { AccountStore } from "./accountStore";
@@ -353,6 +354,52 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.openPanel", () => {
       void vscode.commands.executeCommand("claudeSwitcher.accountsView.focus");
+    })
+  );
+
+  // Diagnostic: prove whether VS Code SecretStorage is shared across containers.
+  // Run "Write" in one container, then "Read" in another.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("claudeSwitcher.debugSecretSharing", async () => {
+      const KEY = "claudeSwitcher.debug.shareTest";
+      const host = os.hostname();
+      const pick = await vscode.window.showQuickPick(
+        [
+          { label: "1 · Write a test secret", detail: "Run this in the FIRST container", action: "write" },
+          { label: "2 · Read the test secret", detail: "Then run this in ANOTHER container", action: "read" },
+        ] as (vscode.QuickPickItem & { action: string })[],
+        { title: "SecretStorage sharing test", placeHolder: "Step 1 in one container, step 2 in another" }
+      );
+      if (!pick) {
+        return;
+      }
+      try {
+        if (pick.action === "write") {
+          const marker = { host, at: new Date().toISOString(), nonce: crypto.randomBytes(4).toString("hex") };
+          await context.secrets.store(KEY, JSON.stringify(marker));
+          void vscode.window.showInformationMessage(
+            `Wrote SecretStorage marker: host=${host} nonce=${marker.nonce}. Now run step 2 in a DIFFERENT container.`
+          );
+        } else {
+          const raw = await context.secrets.get(KEY);
+          if (!raw) {
+            void vscode.window.showWarningMessage(
+              `No marker in this container's SecretStorage (host=${host}). → SecretStorage is NOT shared. (Did you run step 1 in the other container first?)`
+            );
+            return;
+          }
+          const m = JSON.parse(raw) as { host?: string; nonce?: string; at?: string };
+          const shared = m.host && m.host !== host;
+          void vscode.window[shared ? "showInformationMessage" : "showWarningMessage"](
+            `Found marker host=${m.host} nonce=${m.nonce} at=${m.at}; this container=${host}. ` +
+              (shared
+                ? "→ DIFFERENT host from the writer: SecretStorage IS shared across your containers."
+                : "→ Same host as the writer: run step 1 in a DIFFERENT container to prove cross-container sharing.")
+          );
+        }
+      } catch (e) {
+        void vscode.window.showErrorMessage("SecretStorage test failed: " + (e instanceof Error ? e.message : String(e)));
+      }
     })
   );
 

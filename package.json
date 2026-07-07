@@ -96,6 +96,10 @@
       {
         "command": "claudeSwitcher.openPanel",
         "title": "Claude: Show accounts panel"
+      },
+      {
+        "command": "claudeSwitcher.debugSecretSharing",
+        "title": "Claude: Debug — SecretStorage sharing test"
       }
     ],
     "menus": {
@@ -128,6 +132,9 @@
         },
         {
           "command": "claudeSwitcher.validateParked"
+        },
+        {
+          "command": "claudeSwitcher.debugSecretSharing"
         }
       ]
     },
