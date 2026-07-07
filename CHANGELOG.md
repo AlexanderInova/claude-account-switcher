@@ -4,6 +4,13 @@
 
 Reworked for running many windows/devcontainers at once.
 
+- **Choose which credential on Switch and Delete.** When an account has several parked
+  credentials, switching now shows a picker listing each one with when it was parked, when it
+  was last used to fetch usage, its expiry, and whether its token is actually reachable in the
+  shared secret store (an instant local check — ⚠ flags an orphaned reference). Deleting shows
+  a multi-select list so you can remove just some credentials (or all) instead of the whole
+  pool. Accounts with a single credential switch/delete with no extra prompt, as before.
+
 - **Fixed "Switch" silently doing nothing.** When `~/.claude/.credentials.json` (or `~/.claude.json`)
   is a bind-mounted single file, the atomic `rename`-based write can't replace the mount point and
   threw — aborting the switch with no feedback. Writes now fall back to an in-place write when a

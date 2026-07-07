@@ -11,10 +11,11 @@ import { TokenRefresher } from "./oauth";
 import { refreshTokenHash, SecretVault } from "./secretVault";
 import { SharedStore } from "./store";
 import { SwitchService } from "./switchService";
-import { AccountView } from "./types";
+import { fmtAgo, fmtExpiry } from "./timeFmt";
+import { AccountView, CredentialRef } from "./types";
 import { AccountsViewProvider } from "./ui/accountsView";
 import { StatusBarController } from "./ui/statusBar";
-import { UsagePoller } from "./usage";
+import { UsagePoller, usableCredentials } from "./usage";
 
 function realpathSafe(p: string): string {
   try {
@@ -181,7 +182,17 @@ export function activate(context: vscode.ExtensionContext): void {
         if (!targetId) {
           return;
         }
-        const res = await switchService.switchTo(targetId);
+        // When the target has several parked credentials, let the user pick which one.
+        let credId: string | undefined;
+        if (store) {
+          const label = accountStore.listViews().find((v) => v.uuid === targetId)?.label ?? "account";
+          const chosen = await pickCredentialToDeploy(store, vault, targetId, label);
+          if (chosen === null) {
+            return; // cancelled the credential chooser
+          }
+          credId = chosen;
+        }
+        const res = await switchService.switchTo(targetId, credId);
         refreshUI();
         if (!res.ok) {
           vscode.window.showWarningMessage(res.message);
@@ -246,10 +257,21 @@ export function activate(context: vscode.ExtensionContext): void {
           }
           res = await switchService.deleteLocalCredential(targetId);
         } else {
-          if (!(await confirmDelete(`Delete the ${stored} parked credential${stored === 1 ? "" : "s"} for "${label}"? This window stays logged in.`))) {
+          // Which parked credential(s)? Multi-select when there's more than one.
+          const parkedRefs = store?.readAccount(targetId)?.credentials ?? [];
+          let ids: string[] | undefined; // undefined => all parked
+          if (parkedRefs.length > 1) {
+            const chosen = await pickCredentialsToDelete(store!, vault, targetId, label);
+            if (!chosen) {
+              return;
+            }
+            ids = chosen.length === parkedRefs.length ? undefined : chosen;
+          }
+          const count = ids ? ids.length : parkedRefs.length;
+          if (!(await confirmDelete(`Delete ${count} parked credential${count === 1 ? "" : "s"} for "${label}"? This window stays logged in.`))) {
             return;
           }
-          res = await switchService.deleteParked(targetId);
+          res = await switchService.deleteParked(targetId, ids);
         }
         refreshUI();
         if (res && !res.ok) {
@@ -260,7 +282,32 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      // Not active here: delete the whole profile (account entry + parked credentials).
+      // Not active here. With several parked credentials, let the user delete a subset;
+      // deleting all (or ≤1) removes the whole profile.
+      const parkedRefs = store?.readAccount(targetId)?.credentials ?? [];
+      if (parkedRefs.length > 1) {
+        const chosen = await pickCredentialsToDelete(store!, vault, targetId, label);
+        if (!chosen) {
+          return;
+        }
+        if (chosen.length < parkedRefs.length) {
+          if (
+            await confirmDelete(
+              `Delete ${chosen.length} of ${parkedRefs.length} parked credentials for "${label}"? The profile and the remaining credentials are kept.`
+            )
+          ) {
+            const res = await switchService.deleteParked(targetId, chosen);
+            refreshUI();
+            if (res && !res.ok) {
+              vscode.window.showWarningMessage(res.message);
+            }
+          }
+          return;
+        }
+        // All ticked → fall through to whole-profile deletion.
+      }
+
+      // Delete the whole profile (account entry + parked credentials).
       if (
         await confirmDelete(
           `Remove the profile "${label}"? Its ${stored} parked credential${stored === 1 ? "" : "s"} ${stored === 1 ? "is" : "are"} deleted; accounts deployed in other windows are untouched.`
@@ -514,4 +561,86 @@ async function pickAccount(store: AccountStore, title: string): Promise<string |
     matchOnDescription: true,
   });
   return picked?.id;
+}
+
+interface CredPick extends vscode.QuickPickItem {
+  id: string;
+}
+
+/**
+ * QuickPick items for credential refs, showing when each was parked, when it was last
+ * used to fetch usage, its expiry, and whether its token is present in the shared secret
+ * store (an instant local check — not a network probe).
+ */
+async function credItems(vault: SecretVault, refs: CredentialRef[]): Promise<CredPick[]> {
+  const now = Date.now();
+  return Promise.all(
+    refs.map(async (ref) => {
+      const reachable = (await vault.get(ref.id)) !== null;
+      const parts = [
+        `parked ${fmtAgo(ref.addedAt, now)}`,
+        `last used ${fmtAgo(ref.lastUsedAt, now)}`,
+        fmtExpiry(ref.expiresAt, now),
+        reachable ? "✓ available" : "⚠ token unreachable",
+      ];
+      if (ref.invalid) {
+        parts.push("⚠ revoked");
+      }
+      return {
+        label: `$(key) Credential ${ref.id.slice(0, 7)}`,
+        description: parts.join("  ·  "),
+        id: ref.id,
+      };
+    })
+  );
+}
+
+/**
+ * Chooses which parked credential to deploy for an account. Returns the chosen id,
+ * `undefined` to let the service use its default pick (0 or 1 candidate — no prompt),
+ * or `null` if the user cancelled the chooser.
+ */
+async function pickCredentialToDeploy(
+  store: SharedStore,
+  vault: SecretVault,
+  uuid: string,
+  label: string
+): Promise<string | undefined | null> {
+  const file = store.readAccount(uuid);
+  if (!file) {
+    return undefined;
+  }
+  const usable = usableCredentials(file, Date.now());
+  if (usable.length <= 1) {
+    return usable[0]?.id;
+  }
+  const picked = await vscode.window.showQuickPick(await credItems(vault, usable), {
+    title: `Switch to "${label}" — choose a credential`,
+    placeHolder: "Select which parked credential to use",
+    matchOnDescription: true,
+  });
+  return picked ? picked.id : null;
+}
+
+/**
+ * Multi-select chooser for which parked credentials to delete. Returns the ticked ids,
+ * or `null` if the user cancelled or ticked nothing.
+ */
+async function pickCredentialsToDelete(
+  store: SharedStore,
+  vault: SecretVault,
+  uuid: string,
+  label: string
+): Promise<string[] | null> {
+  const refs = store.readAccount(uuid)?.credentials ?? [];
+  const picked = await vscode.window.showQuickPick(await credItems(vault, refs), {
+    title: `Delete parked credentials for "${label}"`,
+    placeHolder: "Tick the credential(s) to delete, then press OK",
+    canPickMany: true,
+    matchOnDescription: true,
+  });
+  if (!picked || picked.length === 0) {
+    return null;
+  }
+  return picked.map((p) => p.id);
 }

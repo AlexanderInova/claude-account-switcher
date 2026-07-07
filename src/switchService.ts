@@ -6,7 +6,7 @@ import { IdentityManager } from "./identity";
 import { SecretVault, refreshTokenHash } from "./secretVault";
 import { SharedStore } from "./store";
 import { AccountFile, CredentialRef, OAuthAccountInfo, OAuthCreds } from "./types";
-import { pickFreeCredential } from "./usage";
+import { usableCredentials } from "./usage";
 
 const PENDING_DEPLOY_KEY = "claudeSwitcher.pendingDeploy";
 const PREV_ACTIVE_KEY = "claudeSwitcher.prevActive";
@@ -206,8 +206,12 @@ export class SwitchService {
     };
   }
 
-  /** Switches to an account: parks the current credential, then deploys a parked one. */
-  async switchTo(uuid: string): Promise<OpResult> {
+  /**
+   * Switches to an account: parks the current credential, then deploys a parked one.
+   * `credId` selects a specific parked credential; when omitted the first usable one
+   * is used (`pickFreeCredential`).
+   */
+  async switchTo(uuid: string, credId?: string): Promise<OpResult> {
     if (!this.store) {
       return this.noStore();
     }
@@ -220,8 +224,14 @@ export class SwitchService {
     }
     // Verify the target is deployable BEFORE we sign the current account out, so a
     // failed switch never leaves the window signed out for nothing.
-    if (!pickFreeCredential(target, Date.now())) {
+    const usable = usableCredentials(target, Date.now());
+    if (usable.length === 0) {
       return { ok: false, message: this.noCredMessage(target) };
+    }
+    // A requested credential that's no longer usable (raced by another window) falls
+    // back to the default pick rather than failing the switch.
+    if (credId && !usable.some((c) => c.id === credId)) {
+      credId = undefined;
     }
 
     const prevUuid = this.accountStore.activeAccountUuid();
@@ -235,7 +245,7 @@ export class SwitchService {
       }
     }
 
-    const res = await this.deploy(uuid, prevUuid);
+    const res = await this.deploy(uuid, prevUuid, credId);
     if (!res.ok && prevUuid && this.store.readAccount(prevUuid)) {
       // Lost the target credential to another window between the check and the deploy —
       // restore the account we just parked so the window isn't left signed out.
@@ -251,14 +261,21 @@ export class SwitchService {
     }. Log in to it in this window, or park one from another window.`;
   }
 
-  private async deploy(uuid: string, prevUuid: string | undefined): Promise<OpResult> {
+  private async deploy(
+    uuid: string,
+    prevUuid: string | undefined,
+    credId?: string
+  ): Promise<OpResult> {
     const store = this.store!;
     const now = Date.now();
     const file = store.readAccount(uuid);
     if (!file) {
       return { ok: false, message: "Account not found." };
     }
-    const ref = pickFreeCredential(file, now);
+    const usable = usableCredentials(file, now);
+    // Deploy the requested credential when it's still usable; otherwise (not given or
+    // consumed by another window) fall back to the first usable one.
+    const ref = (credId && usable.find((c) => c.id === credId)) || usable[0];
     if (!ref) {
       return { ok: false, message: this.noCredMessage(file) };
     }
@@ -436,23 +453,26 @@ export class SwitchService {
   }
 
   /**
-   * Deletes all parked (pooled) credentials for the account, keeping it logged in
-   * locally. The account entry is kept (it is still active here).
+   * Deletes parked (pooled) credentials for the account, keeping it logged in locally.
+   * `credIds` restricts the deletion to those references; when omitted, all parked
+   * credentials are removed. The account entry is kept (it may still be active here).
    */
-  async deleteParked(uuid: string): Promise<OpResult> {
+  async deleteParked(uuid: string, credIds?: string[]): Promise<OpResult> {
     if (!this.store) {
       return this.noStore();
     }
     const label = this.store.readAccount(uuid)?.account.label ?? uuid;
+    const only = credIds ? new Set(credIds) : undefined;
     let ids: string[] = [];
     await this.store.withAccountLock(uuid, () => {
       const f = this.store!.readAccount(uuid);
       if (!f) {
         return;
       }
-      ids = f.credentials.map((c) => c.id);
-      f.credentials = [];
-      if (f.account.suspended?.reason === "invalid-grant") {
+      ids = f.credentials.filter((c) => !only || only.has(c.id)).map((c) => c.id);
+      f.credentials = only ? f.credentials.filter((c) => !only.has(c.id)) : [];
+      // Clearing a dead-token suspension only makes sense once no parked credential remains.
+      if (f.credentials.length === 0 && f.account.suspended?.reason === "invalid-grant") {
         f.account.suspended = undefined;
       }
       this.store!.writeAccount(f);

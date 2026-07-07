@@ -167,11 +167,16 @@ export function isDue(now: number, intervalMs: number, usage: UsageFile | null |
   return now - Math.max(fetchedAt, lastAttempt) >= intervalMs;
 }
 
-/** First usable (present, not invalid, not freshly leased) parked credential. */
-export function pickFreeCredential(file: AccountFile, now: number): CredentialRef | undefined {
-  return file.credentials.find(
+/** All usable (not invalid, not freshly leased) parked credentials, in pool order. */
+export function usableCredentials(file: AccountFile, now: number): CredentialRef[] {
+  return file.credentials.filter(
     (c) => !c.invalid && (!c.lease || now - c.lease.at > LEASE_STALE_MS)
   );
+}
+
+/** First usable (present, not invalid, not freshly leased) parked credential. */
+export function pickFreeCredential(file: AccountFile, now: number): CredentialRef | undefined {
+  return usableCredentials(file, now)[0];
 }
 
 /** Validity verdict for a parked credential being tested. */
