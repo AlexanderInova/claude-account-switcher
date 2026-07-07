@@ -262,9 +262,17 @@ export class SwitchService {
     if (!ref) {
       return { ok: false, message: this.noCredMessage(file) };
     }
-    const creds = await this.vault.getVerified(ref.id, ref.refreshTokenHash);
+    // Trust the stored blob: it is written before the ref-hash, so if the two ever
+    // diverge the blob is the newer, authoritative token. A stale ref-hash must not
+    // block a deploy (that was the "stored credential is unavailable" bug). Only a
+    // genuinely missing blob is fatal — then the ref is an orphan; drop it.
+    const creds = await this.vault.get(ref.id);
     if (!creds) {
-      return { ok: false, message: "Stored credential is unavailable right now — try again." };
+      await this.dropRef(uuid, ref.id);
+      return {
+        ok: false,
+        message: `The parked credential for "${file.account.label}" is no longer available and was removed. Re-park it from a window where it's logged in.`,
+      };
     }
 
     // Remove the reference first (crash-safe: the blob still exists for recovery).
@@ -350,6 +358,19 @@ export class SwitchService {
         store.writeAccount(f);
       }
     });
+  }
+
+  /** Removes an orphaned credential reference (its token blob is gone). */
+  private async dropRef(uuid: string, credId: string): Promise<void> {
+    const store = this.store!;
+    await store.withAccountLock(uuid, () => {
+      const f = store.readAccount(uuid);
+      if (f) {
+        f.credentials = f.credentials.filter((c) => c.id !== credId);
+        store.writeAccount(f);
+      }
+    });
+    this.accountStore.reload(Date.now());
   }
 
   // --- account admin ---

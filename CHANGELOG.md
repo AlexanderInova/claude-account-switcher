@@ -8,6 +8,14 @@ Reworked for running many windows/devcontainers at once.
   is a bind-mounted single file, the atomic `rename`-based write can't replace the mount point and
   threw — aborting the switch with no feedback. Writes now fall back to an in-place write when a
   rename isn't possible, and the Switch command surfaces any error instead of failing silently.
+- **Fixed "Stored credential is unavailable" on Switch.** A parked credential's shared ref-hash could
+  drift from its stored token; the deploy required them to match and refused. Deploy now trusts the
+  stored token (which is always written before the ref-hash, so it's authoritative). If the token is
+  genuinely missing, the orphaned entry is removed with a clear "re-park it" message instead of a dead
+  button. "Test parked credentials" now also detects and drops **orphaned** entries (missing token),
+  reported separately from invalid ones. Idle parked spares are no longer refreshed/rotated just to
+  poll usage (that churn was the source of the drift). Added a "Debug — Inspect parked credentials"
+  action that shows, per credential, whether its token is present and its hash matches.
 
 - **Credential pool model.** Accounts and credentials are now separate: an account can hold several
   credentials, which are either *live* in one window or *parked* (idle) in a shared pool — never

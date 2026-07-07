@@ -222,10 +222,6 @@ export function errorSnapshot(
   };
 }
 
-function short(s: string | undefined): string {
-  return (s ?? "").slice(0, 160);
-}
-
 function emptyUsage(): UsageFile {
   return {
     rev: 0,
@@ -426,7 +422,7 @@ export class UsagePoller {
         ref.lease = { instanceId: this.instanceId, at: now };
         this.store!.writeAccount(file);
         this.store!.writeUsage(uuid, { ...(usage ?? emptyUsage()), lastAttemptAt: now });
-        return { kind: "lease", credId: ref.id, hash: ref.refreshTokenHash, unverified: !!ref.unverified };
+        return { kind: "lease", credId: ref.id, unverified: !!ref.unverified };
       }
       return activeHere ? { kind: "waiting" } : { kind: "none" };
     });
@@ -443,42 +439,26 @@ export class UsagePoller {
       await this.applyResult(uuid, result, now, null);
       return;
     }
-    await this.runLease(uuid, plan.credId, plan.hash, plan.unverified, now);
+    await this.runLease(uuid, plan.credId, plan.unverified, now);
   }
 
-  private async runLease(
-    uuid: string,
-    credId: string,
-    hash: string,
-    unverified: boolean,
-    now: number
-  ): Promise<void> {
+  private async runLease(uuid: string, credId: string, unverified: boolean, now: number): Promise<void> {
     if (!this.store) {
       return;
     }
-    let creds = await this.vault.getVerified(credId, hash);
+    // Trust the stored blob (don't gate on a possibly-stale ref-hash).
+    const creds = await this.vault.get(credId);
     if (!creds) {
-      // Secret not propagated yet or hash drifted — transient; release and retry later.
+      // Orphaned ref — leave it for the "Test parked credentials" cleanup; just release.
       await this.clearLease(uuid, credId);
       return;
     }
-
     if (TokenRefresher.isExpired(creds)) {
-      const r = await this.refresher.refresh(creds);
-      if (r.ok && r.creds) {
-        creds = r.creds;
-        await this.vault.put(credId, creds); // write-back BEFORE the usage GET
-        await this.updateRefTokens(uuid, credId, creds);
-      } else if (r.terminal) {
-        await this.handleInvalidGrant(uuid, credId, r.error ?? "invalid_grant", now);
-        return;
-      } else {
-        await this.clearLease(uuid, credId);
-        await this.writeError(uuid, { error: "Token refresh failed: " + short(r.error) }, now);
-        return;
-      }
+      // Do NOT refresh/rotate an idle spare merely to poll usage — that churns the
+      // ref/blob pair and spends a single-use refresh token. Skip this cycle.
+      await this.clearLease(uuid, credId);
+      return;
     }
-
     const result = await fetchUsage(creds);
     await this.applyResult(uuid, result, now, credId, unverified);
   }
@@ -571,43 +551,6 @@ export class UsagePoller {
     });
   }
 
-  private async handleInvalidGrant(
-    uuid: string,
-    credId: string,
-    detail: string,
-    now: number
-  ): Promise<void> {
-    if (!this.store) {
-      return;
-    }
-    await this.store.withAccountLock(uuid, () => {
-      const file = this.store!.readAccount(uuid);
-      if (file) {
-        const ref = file.credentials.find((c) => c.id === credId);
-        if (ref) {
-          ref.invalid = { at: now, detail: short(detail) };
-          delete ref.lease;
-        }
-        const usable = file.credentials.filter((c) => !c.invalid).length;
-        const activeHere = this.accountStore.activeAccountUuid() === uuid;
-        const activeElsewhere = this.accountStore
-          .liveInstances()
-          .some((i) => i.instanceId !== this.instanceId && i.activeAccountUuid === uuid);
-        if (this.getAutoSuspend() && usable === 0 && !activeHere && !activeElsewhere) {
-          file.account.suspended = { at: now, reason: "invalid-grant", detail: short(detail) };
-        }
-        this.store!.writeAccount(file);
-      }
-      const usage = this.store!.readUsage(uuid) ?? emptyUsage();
-      this.store!.writeUsage(uuid, {
-        ...usage,
-        snapshot: errorSnapshot(usage.snapshot, { error: "Refresh token invalid" }, now),
-        lastAttemptAt: now,
-      });
-    });
-    await this.vault.remove(credId);
-  }
-
   private async updateRefTokens(uuid: string, credId: string, creds: OAuthCreds): Promise<void> {
     if (!this.store) {
       return;
@@ -668,11 +611,13 @@ export class UsagePoller {
   async validateParkedCredentials(): Promise<{
     tested: number;
     dropped: number;
+    invalid: number;
+    orphaned: number;
     kept: number;
     transient: number;
     rateLimited: boolean;
   }> {
-    const result = { tested: 0, dropped: 0, kept: 0, transient: 0, rateLimited: false };
+    const result = { tested: 0, dropped: 0, invalid: 0, orphaned: 0, kept: 0, transient: 0, rateLimited: false };
     if (!this.store) {
       return result;
     }
@@ -701,17 +646,22 @@ export class UsagePoller {
           }
           ref.lease = { instanceId: this.instanceId, at: now };
           this.store!.writeAccount(file);
-          return { hash: ref.refreshTokenHash };
+          return true;
         });
         if (!claim) {
           continue;
         }
 
         result.tested++;
-        const verdict = await this.probeCredential(uuid, credId, claim.hash);
-        if (verdict === "invalid") {
+        const verdict = await this.probeCredential(uuid, credId);
+        if (verdict === "invalid" || verdict === "orphaned") {
           await this.dropParkedCredential(uuid, credId);
           result.dropped++;
+          if (verdict === "orphaned") {
+            result.orphaned++;
+          } else {
+            result.invalid++;
+          }
         } else if (verdict === "valid") {
           await this.clearLease(uuid, credId);
           result.kept++;
@@ -731,16 +681,16 @@ export class UsagePoller {
     return result;
   }
 
-  /** Probes one leased parked credential. Returns its verdict (429 flagged separately). */
-  private async probeCredential(
-    uuid: string,
-    credId: string,
-    hash: string
-  ): Promise<Verdict | "transient-429"> {
-    const creds = await this.vault.getVerified(credId, hash);
+  /**
+   * Probes one leased parked credential against its actual stored blob (not a
+   * hash-gated read), so a stale ref-hash never masquerades as a failure. Returns:
+   * `orphaned` (blob gone), `invalid` (dead grant), `valid`, `transient`, or
+   * `transient-429`. On success it heals any ref/blob hash divergence.
+   */
+  private async probeCredential(uuid: string, credId: string): Promise<Verdict | "orphaned" | "transient-429"> {
+    const creds = await this.vault.get(credId);
     if (!creds) {
-      // Blob truly gone → orphan ref, invalid. Hash mismatch → transient.
-      return (await this.vault.get(credId)) === null ? "invalid" : "transient";
+      return "orphaned"; // ref points at a token that no longer exists
     }
     if (TokenRefresher.isExpired(creds)) {
       const r = await this.refresher.refresh(creds);
@@ -755,7 +705,11 @@ export class UsagePoller {
     if (res.status === 429) {
       return "transient-429";
     }
-    return verdictFromStatus(res.status);
+    const verdict = verdictFromStatus(res.status);
+    if (verdict === "valid") {
+      await this.updateRefTokens(uuid, credId, creds); // reconcile a drifted ref-hash
+    }
+    return verdict;
   }
 
   // --- no-store fallback ---
@@ -795,4 +749,4 @@ type PollPlan =
   | { kind: "none" }
   | { kind: "waiting" }
   | { kind: "local" }
-  | { kind: "lease"; credId: string; hash: string; unverified: boolean };
+  | { kind: "lease"; credId: string; unverified: boolean };

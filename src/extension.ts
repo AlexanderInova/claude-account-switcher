@@ -8,7 +8,7 @@ import { CredentialsManager } from "./credentials";
 import { claudeJsonPathFrom, IdentityManager } from "./identity";
 import { migrateIfNeeded } from "./migrate";
 import { TokenRefresher } from "./oauth";
-import { SecretVault } from "./secretVault";
+import { refreshTokenHash, SecretVault } from "./secretVault";
 import { SharedStore } from "./store";
 import { SwitchService } from "./switchService";
 import { AccountView } from "./types";
@@ -320,7 +320,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       const confirm = await vscode.window.showWarningMessage(
-        `Test all ${parked} parked credential${parked === 1 ? "" : "s"}? Invalid ones are permanently removed. This makes a network request per credential.`,
+        `Test all ${parked} parked credential${parked === 1 ? "" : "s"}? Invalid (revoked) and orphaned (missing token) ones are permanently removed. This makes a network request per credential.`,
         { modal: true },
         "Test"
       );
@@ -332,7 +332,14 @@ export function activate(context: vscode.ExtensionContext): void {
         () => poller.validateParkedCredentials()
       );
       refreshUI();
-      const bits = [`tested ${res.tested}`, `dropped ${res.dropped}`, `kept ${res.kept}`];
+      const dropDetail: string[] = [];
+      if (res.invalid) dropDetail.push(`${res.invalid} invalid`);
+      if (res.orphaned) dropDetail.push(`${res.orphaned} orphaned/missing token`);
+      const bits = [
+        `tested ${res.tested}`,
+        `dropped ${res.dropped}${dropDetail.length ? ` (${dropDetail.join(", ")})` : ""}`,
+        `kept ${res.kept}`,
+      ];
       if (res.transient) bits.push(`${res.transient} inconclusive`);
       if (res.rateLimited) bits.push("stopped early (rate limit)");
       vscode.window.showInformationMessage("Parked credentials: " + bits.join(", ") + ".");
@@ -367,6 +374,7 @@ export function activate(context: vscode.ExtensionContext): void {
         [
           { label: "1 · Write a test secret", detail: "Run this in the FIRST container", action: "write" },
           { label: "2 · Read the test secret", detail: "Then run this in ANOTHER container", action: "read" },
+          { label: "Inspect parked credentials", detail: "Show each parked ref: is its token blob present + does the hash match?", action: "inspect" },
         ] as (vscode.QuickPickItem & { action: string })[],
         { title: "SecretStorage sharing test", placeHolder: "Step 1 in one container, step 2 in another" }
       );
@@ -374,6 +382,32 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       try {
+        if (pick.action === "inspect") {
+          if (!store) {
+            void vscode.window.showWarningMessage("No shared store — nothing to inspect.");
+            return;
+          }
+          const lines: string[] = [];
+          for (const f of store.listAccounts()) {
+            for (const ref of f.credentials) {
+              const blob = await vault.get(ref.id);
+              const blobHash = blob ? refreshTokenHash(blob) : null;
+              const state = !blob
+                ? "ORPHANED (blob missing)"
+                : blobHash === ref.refreshTokenHash
+                  ? "ok (hash matches)"
+                  : `HASH MISMATCH (ref ${ref.refreshTokenHash} vs blob ${blobHash})`;
+              lines.push(
+                `${f.account.label} · ${ref.id.slice(0, 8)} · ${state}${ref.invalid ? " · marked-invalid" : ""}`
+              );
+            }
+          }
+          void vscode.window.showInformationMessage(
+            lines.length ? `Parked credentials (${lines.length}):` : "No parked credentials.",
+            { modal: true, detail: lines.join("\n") }
+          );
+          return;
+        }
         if (pick.action === "write") {
           const marker = { host, at: new Date().toISOString(), nonce: crypto.randomBytes(4).toString("hex") };
           await context.secrets.store(KEY, JSON.stringify(marker));
