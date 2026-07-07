@@ -16,6 +16,12 @@ export interface RefreshResult {
   creds?: OAuthCreds;
   error?: string;
   status?: number;
+  /**
+   * True when the failure means this refresh token is permanently unusable
+   * (e.g. HTTP 400/401 invalid_grant — rotated away by someone else or revoked).
+   * Transient failures (network, 5xx, 429) are false and worth retrying.
+   */
+  terminal?: boolean;
 }
 
 export class TokenRefresher {
@@ -36,10 +42,13 @@ export class TokenRefresher {
 
       if (!res.ok) {
         const body = await res.text().catch(() => "");
+        const terminal =
+          res.status === 400 || res.status === 401 || /invalid_grant/i.test(body);
         return {
           ok: false,
           status: res.status,
           error: `HTTP ${res.status}: ${body.slice(0, 200)}`,
+          terminal,
         };
       }
 

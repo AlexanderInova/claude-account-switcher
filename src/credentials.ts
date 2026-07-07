@@ -6,7 +6,7 @@ import { CredentialsFile, OAuthCreds } from "./types";
 
 /**
  * Reads and writes the Claude Code credentials file (~/.claude/.credentials.json).
- * Switching accounts = swapping the contents of this file.
+ * Deploying an account = writing that account's tokens here; parking = removing them.
  */
 export class CredentialsManager {
   getCredentialsPath(): string {
@@ -25,6 +25,15 @@ export class CredentialsManager {
       return fs.existsSync(this.getCredentialsPath());
     } catch {
       return false;
+    }
+  }
+
+  /** mtime of the credentials file (0 if missing) — cheap change detection. */
+  mtimeMs(): number {
+    try {
+      return fs.statSync(this.getCredentialsPath()).mtimeMs;
+    } catch {
+      return 0;
     }
   }
 
@@ -65,8 +74,25 @@ export class CredentialsManager {
 
     const existing = this.readRawFile() ?? ({} as CredentialsFile);
     const next: CredentialsFile = { ...existing, claudeAiOauth: creds };
-    const json = JSON.stringify(next, null, 2);
+    this.atomicWrite(p, JSON.stringify(next, null, 2));
+  }
 
+  /**
+   * Removes the claudeAiOauth block (signs the local Claude Code out) while
+   * preserving any other fields. No-op if the file is missing.
+   */
+  clearLocal(): void {
+    const p = this.getCredentialsPath();
+    const existing = this.readRawFile();
+    if (!existing) {
+      return;
+    }
+    const next = { ...existing } as Partial<CredentialsFile>;
+    delete next.claudeAiOauth;
+    this.atomicWrite(p, JSON.stringify(next, null, 2));
+  }
+
+  private atomicWrite(p: string, json: string): void {
     const tmp = p + ".tmp-" + process.pid;
     fs.writeFileSync(tmp, json, { encoding: "utf8", mode: 0o600 });
     fs.renameSync(tmp, p);
@@ -75,46 +101,5 @@ export class CredentialsManager {
     } catch {
       /* best-effort on Windows */
     }
-  }
-
-  private backupPath(): string {
-    return this.getCredentialsPath() + ".bak";
-  }
-
-  /** Copies the current file to .bak (enables undoing a switch). */
-  backupCurrent(): boolean {
-    const p = this.getCredentialsPath();
-    try {
-      if (fs.existsSync(p)) {
-        fs.copyFileSync(p, this.backupPath());
-        return true;
-      }
-    } catch {
-      /* ignore */
-    }
-    return false;
-  }
-
-  hasBackup(): boolean {
-    try {
-      return fs.existsSync(this.backupPath());
-    } catch {
-      return false;
-    }
-  }
-
-  /** Restores the file from .bak. Returns true on success. */
-  restoreBackup(): boolean {
-    const bak = this.backupPath();
-    const p = this.getCredentialsPath();
-    try {
-      if (fs.existsSync(bak)) {
-        fs.copyFileSync(bak, p);
-        return true;
-      }
-    } catch {
-      /* ignore */
-    }
-    return false;
   }
 }

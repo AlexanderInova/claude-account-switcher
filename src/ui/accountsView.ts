@@ -1,15 +1,29 @@
 import * as vscode from "vscode";
 import { AccountStore } from "../accountStore";
 
+interface ViewMeter {
+  label: string;
+  percent: number;
+  severity: string;
+  resetsAt: string | null;
+}
+
 interface ViewAccount {
   id: string;
   label: string;
+  email?: string;
   subscriptionType?: string;
   isActive: boolean;
-  windows: { label: string; percent: number; severity: string; resetsAt: string | null }[];
+  updatesEnabled: boolean;
+  suspendedReason?: "rate-limit" | "invalid-grant";
+  suspendedDetail?: string;
+  parkedCount: number;
+  invalidCount: number;
+  inUseByOthers: string[];
+  windows: ViewMeter[];
   error?: string;
+  errorAt?: number;
   fetchedAt?: number;
-  retryAfter?: number;
 }
 
 /** Activity bar panel: list of accounts with usage limits and actions. */
@@ -53,6 +67,10 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
         case "rename":
           if (msg.id) void vscode.commands.executeCommand("claudeSwitcher.renameAccount", msg.id);
           break;
+        case "togglePause":
+          if (msg.id)
+            void vscode.commands.executeCommand("claudeSwitcher.toggleAccountUpdates", msg.id);
+          break;
         case "undo":
           void vscode.commands.executeCommand("claudeSwitcher.undoSwitch");
           break;
@@ -67,22 +85,38 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
     if (!this.view) {
       return;
     }
-    const activeId = this.store.getActiveId();
-    const accounts: ViewAccount[] = this.store.list().map((p) => ({
-      id: p.id,
-      label: p.label,
-      subscriptionType: p.subscriptionType,
-      isActive: p.id === activeId,
-      windows: p.lastUsage?.windows ?? [],
-      error: p.lastUsage?.error,
-      fetchedAt: p.lastUsage?.fetchedAt,
-      retryAfter: p.lastUsage?.retryAfter,
+    const accounts: ViewAccount[] = this.store.listViews().map((v) => ({
+      id: v.uuid,
+      label: v.label,
+      email: v.email,
+      subscriptionType: v.subscriptionType,
+      isActive: v.isActive,
+      updatesEnabled: v.updatesEnabled,
+      suspendedReason: v.suspended?.reason,
+      suspendedDetail: v.suspended?.detail,
+      parkedCount: v.parkedCount,
+      invalidCount: v.invalidCount,
+      inUseByOthers: v.inUseByOthers,
+      windows: v.lastUsage?.windows ?? [],
+      error: v.lastUsage?.error,
+      errorAt: v.lastUsage?.errorAt,
+      fetchedAt: v.lastUsage?.fetchedAt,
     }));
+
     const warnThreshold = vscode.workspace
       .getConfiguration("claudeSwitcher")
       .get<number>("warnThresholdPercent", 80);
 
-    void this.view.webview.postMessage({ type: "state", accounts, warnThreshold });
+    void this.view.webview.postMessage({
+      type: "state",
+      accounts,
+      warnThreshold,
+      sync: {
+        enabled: this.store.hasStore(),
+        folder: this.store.storeDir(),
+        windows: this.store.liveInstances().length,
+      },
+    });
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -111,13 +145,14 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div id="toolbar">
-    <button id="addBtn" class="primary">+ Save current account</button>
+    <button id="addBtn" class="primary" title="Park the current credential into the pool and sign out here">⛁ Park current credential</button>
     <button id="refreshBtn" title="Refresh usage limits">⟳</button>
   </div>
+  <div id="syncBar" class="sub"></div>
   <div id="list"></div>
   <div id="empty" class="hidden">
     <p>No saved accounts.</p>
-    <p>Log in to Claude Code, then click <b>"Save current account"</b>.</p>
+    <p>Log in to Claude Code, then click <b>"Park current credential"</b> to save it for switching.</p>
   </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

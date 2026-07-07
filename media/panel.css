@@ -89,9 +89,55 @@ button.primary:hover {
   color: #fff;
 }
 
+.badge.paused {
+  background: var(--vscode-charts-yellow, #d7a824);
+  color: #000;
+}
+
+.badge.danger-badge {
+  background: var(--vscode-charts-red, #e5534b);
+  color: #fff;
+}
+
+.head-btns {
+  display: flex;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chip {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+  opacity: 0.85;
+}
+
 .sub {
   font-size: 11px;
   opacity: 0.7;
+}
+
+#syncBar {
+  margin-bottom: 8px;
+}
+
+.warn-text {
+  color: var(--vscode-errorForeground);
+  opacity: 1;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .meter {

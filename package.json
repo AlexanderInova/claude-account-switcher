@@ -2,7 +2,7 @@
   "name": "claude-code-account-switcher",
   "displayName": "Claude Multi-Account Switcher",
   "description": "Quickly switch between Claude accounts (subscriptions) in Claude Code, with live usage limits.",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "publisher": "KrzysztofZander",
   "author": {
     "name": "Krzysztof Zander",
@@ -59,8 +59,8 @@
     "commands": [
       {
         "command": "claudeSwitcher.addCurrentAccount",
-        "title": "Claude: Save current account as profile",
-        "icon": "$(add)"
+        "title": "Claude: Park current credential (sign out here)",
+        "icon": "$(archive)"
       },
       {
         "command": "claudeSwitcher.switchAccount",
@@ -79,6 +79,10 @@
       {
         "command": "claudeSwitcher.renameAccount",
         "title": "Claude: Rename account profile"
+      },
+      {
+        "command": "claudeSwitcher.toggleAccountUpdates",
+        "title": "Claude: Pause/resume usage updates for account"
       },
       {
         "command": "claudeSwitcher.undoSwitch",
@@ -108,6 +112,9 @@
         },
         {
           "command": "claudeSwitcher.renameAccount"
+        },
+        {
+          "command": "claudeSwitcher.toggleAccountUpdates"
         }
       ]
     },
@@ -118,12 +125,27 @@
           "type": "number",
           "default": 240,
           "minimum": 180,
-          "markdownDescription": "How often (in seconds) to automatically refresh usage limits for each account. The endpoint is heavily rate-limited — values below 180s are raised to 180s."
+          "markdownDescription": "Target freshness (in seconds) for each account's usage limits. When several windows share a store they coordinate so each account is polled about this often *in total* (not per window). The endpoint is heavily rate-limited — values below 180s are raised to 180s."
         },
         "claudeSwitcher.autoReloadAfterSwitch": {
           "type": "boolean",
           "default": false,
           "markdownDescription": "Automatically reload the VS Code window after switching accounts (required for Claude Code to pick up the new account). When disabled, the extension asks first."
+        },
+        "claudeSwitcher.autoSuspend": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Automatically pause an account's usage updates after a rate limit (429) or an invalid/expired refresh token, until you press **Retry**. Previously fetched usage stays visible. When off, a 429 only backs off for 5 minutes and dead credentials are still skipped."
+        },
+        "claudeSwitcher.sync.enabled": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Coordinate accounts, usage polling, and locking through a shared folder so many windows/devcontainers cooperate instead of colliding. When off, the extension only tracks the account currently logged in to this window."
+        },
+        "claudeSwitcher.sync.folder": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Absolute path to the shared coordination folder. Empty = auto-detect a `.claude-account-switcher` directory in the workspace, otherwise fall back to `account-switcher/` next to the credentials file (e.g. `~/.claude/account-switcher/`). Token material is never written here — only metadata, ids, and usage. Reload the window after changing this."
         },
         "claudeSwitcher.credentialsPath": {
           "type": "string",

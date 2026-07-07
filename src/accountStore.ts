@@ -1,156 +1,218 @@
-import * as crypto from "crypto";
-import * as vscode from "vscode";
-import { AccountProfile, OAuthCreds, UsageSnapshot } from "./types";
+import { CredentialsManager } from "./credentials";
+import { IdentityManager } from "./identity";
+import { SharedStore } from "./store";
+import { AccountFile, AccountView, InstanceInfo, OAuthAccountInfo, UsageFile, UsageSnapshot } from "./types";
 
-const PROFILES_KEY = "claudeSwitcher.profiles";
-const ACTIVE_KEY = "claudeSwitcher.activeId";
-const SECRET_PREFIX = "claudeSwitcher.account.";
+const ACTIVE_MEMO_KEY = "claudeSwitcher.activeMemo";
+const LOCAL_USAGE_KEY = "claudeSwitcher.localUsage";
+
+/** Minimal subset of vscode.Memento (so this module needs no vscode types). */
+export interface KeyValueStore {
+  get<T>(key: string): T | undefined;
+  update(key: string, value: unknown): Thenable<void> | Promise<void>;
+}
 
 /**
- * Stores account profiles. Metadata (list, order, last usage snapshot) is kept in
- * globalState; secrets (OAuth tokens) in the encrypted SecretStorage.
+ * Read-mostly, UI-facing cache over the shared store. It also owns *active-account
+ * detection*, which is derived locally (from ~/.claude.json + the credentials file),
+ * never stored globally — so one instance can never set another's "active" marker.
  *
- * The "active" account is the one whose tokens are currently in .credentials.json.
- * Because Claude Code rotates tokens, the source of truth is the remembered
- * `activeId`, and we sync the active profile's creds from the file (syncActiveFromFile).
+ * Mutations (park/deploy/lease/poll writes) live in SwitchService / UsagePoller and
+ * go straight to SharedStore under per-account locks; this class just reflects them.
  */
 export class AccountStore {
-  constructor(private readonly context: vscode.ExtensionContext) {}
+  private accounts = new Map<string, AccountFile>();
+  private usage = new Map<string, UsageFile>();
+  private instances: InstanceInfo[] = [];
 
-  private get profiles(): AccountProfile[] {
-    return this.context.globalState.get<AccountProfile[]>(PROFILES_KEY, []);
+  private activeUuid?: string;
+  private activeIdent?: OAuthAccountInfo;
+
+  private lastSignature = "";
+  private lastCredMtime = -1;
+  private lastClaudeJsonMtime = -1;
+
+  constructor(
+    private readonly store: SharedStore | null,
+    private readonly credentials: CredentialsManager,
+    private readonly identity: IdentityManager,
+    private readonly memento: KeyValueStore,
+    private readonly instanceId: string
+  ) {}
+
+  hasStore(): boolean {
+    return this.store !== null;
   }
 
-  private async saveProfiles(profiles: AccountProfile[]): Promise<void> {
-    await this.context.globalState.update(PROFILES_KEY, profiles);
+  storeDir(): string | undefined {
+    return this.store?.root;
   }
 
-  list(): AccountProfile[] {
-    return [...this.profiles].sort((a, b) => a.order - b.order);
-  }
+  // --- reload from disk ---
 
-  get(id: string): AccountProfile | undefined {
-    return this.profiles.find((p) => p.id === id);
-  }
-
-  getActiveId(): string | undefined {
-    return this.context.globalState.get<string>(ACTIVE_KEY);
-  }
-
-  async setActiveId(id: string | undefined): Promise<void> {
-    await this.context.globalState.update(ACTIVE_KEY, id);
-  }
-
-  private secretKey(id: string): string {
-    return SECRET_PREFIX + id;
-  }
-
-  async getCreds(id: string): Promise<OAuthCreds | null> {
-    const raw = await this.context.secrets.get(this.secretKey(id));
-    if (!raw) {
-      return null;
+  /** Reloads account/usage/instance state if anything changed. Returns true if it did. */
+  reload(now: number): boolean {
+    if (!this.store) {
+      // No shared store: the only "account" is whatever is logged in locally.
+      return this.refreshActiveIfChanged();
     }
-    try {
-      return JSON.parse(raw) as OAuthCreds;
-    } catch {
-      return null;
-    }
-  }
-
-  private async setCreds(id: string, creds: OAuthCreds): Promise<void> {
-    await this.context.secrets.store(this.secretKey(id), JSON.stringify(creds));
-  }
-
-  /** Creates a new profile from the given creds and marks it active. */
-  async addFromCreds(label: string, creds: OAuthCreds): Promise<AccountProfile> {
-    const profiles = this.profiles;
-    const maxOrder = profiles.reduce((m, p) => Math.max(m, p.order), -1);
-    const profile: AccountProfile = {
-      id: crypto.randomUUID(),
-      label,
-      subscriptionType: creds.subscriptionType,
-      addedAt: Date.now(),
-      order: maxOrder + 1,
-    };
-    profiles.push(profile);
-    await this.saveProfiles(profiles);
-    await this.setCreds(profile.id, creds);
-    await this.setActiveId(profile.id);
-    return profile;
-  }
-
-  async remove(id: string): Promise<void> {
-    const profiles = this.profiles.filter((p) => p.id !== id);
-    await this.saveProfiles(profiles);
-    await this.context.secrets.delete(this.secretKey(id));
-    if (this.getActiveId() === id) {
-      await this.setActiveId(undefined);
-    }
-  }
-
-  async rename(id: string, label: string): Promise<void> {
-    const profiles = this.profiles;
-    const p = profiles.find((x) => x.id === id);
-    if (p) {
-      p.label = label;
-      await this.saveProfiles(profiles);
-    }
-  }
-
-  async updateUsage(id: string, usage: UsageSnapshot): Promise<void> {
-    const profiles = this.profiles;
-    const p = profiles.find((x) => x.id === id);
-    if (p) {
-      p.lastUsage = usage;
-      await this.saveProfiles(profiles);
-    }
-  }
-
-  /** Overwrites a profile's tokens (e.g. after a refresh) and updates the subscription type. */
-  async updateCreds(id: string, creds: OAuthCreds): Promise<void> {
-    await this.setCreds(id, creds);
-    const profiles = this.profiles;
-    const p = profiles.find((x) => x.id === id);
-    if (p && creds.subscriptionType && p.subscriptionType !== creds.subscriptionType) {
-      p.subscriptionType = creds.subscriptionType;
-      await this.saveProfiles(profiles);
-    }
-  }
-
-  /** Finds a profile with matching tokens (to detect duplicates / the active one). */
-  async findByTokens(creds: OAuthCreds): Promise<string | undefined> {
-    for (const p of this.profiles) {
-      const stored = await this.getCreds(p.id);
-      if (
-        stored &&
-        (stored.accessToken === creds.accessToken ||
-          stored.refreshToken === creds.refreshToken)
-      ) {
-        return p.id;
+    const sig = this.store.revSignature();
+    const changed = sig !== this.lastSignature;
+    if (changed) {
+      this.lastSignature = sig;
+      this.accounts = new Map(this.store.listAccounts().map((f) => [f.account.uuid, f]));
+      this.usage = new Map();
+      for (const uuid of this.accounts.keys()) {
+        const u = this.store.readUsage(uuid);
+        if (u) {
+          this.usage.set(uuid, u);
+        }
       }
     }
-    return undefined;
+    this.instances = this.store.listLiveInstances(now);
+    const activeChanged = this.refreshActiveIfChanged();
+    return changed || activeChanged;
   }
 
-  /**
-   * Syncs the active profile's creds with the current file (the file is the source of
-   * truth for the active account, since Claude Code rotates tokens). If the file matches
-   * a different profile, switches activeId to that profile.
-   */
-  async syncActiveFromFile(fileCreds: OAuthCreds | null): Promise<void> {
-    if (!fileCreds) {
+  /** Recomputes the active account if the credentials or ~/.claude.json changed. */
+  refreshActiveIfChanged(): boolean {
+    const credMtime = this.credentials.mtimeMs();
+    const claudeJsonMtime = this.identity.mtimeMs();
+    if (credMtime === this.lastCredMtime && claudeJsonMtime === this.lastClaudeJsonMtime) {
+      return false;
+    }
+    this.lastCredMtime = credMtime;
+    this.lastClaudeJsonMtime = claudeJsonMtime;
+    this.recomputeActive();
+    return true;
+  }
+
+  recomputeActive(): void {
+    const creds = this.credentials.readCurrent();
+    if (!creds) {
+      this.activeUuid = undefined;
+      this.activeIdent = undefined;
       return;
     }
-    const matched = await this.findByTokens(fileCreds);
-    if (matched) {
-      await this.setActiveId(matched);
-      await this.updateCreds(matched, fileCreds);
+    const ident = this.identity.readLocalIdentity();
+    this.activeIdent = ident ?? undefined;
+
+    if (ident && this.accounts.has(ident.accountUuid)) {
+      this.activeUuid = ident.accountUuid;
       return;
     }
-    // No match (e.g. token rotation) — refresh the remembered active profile.
-    const activeId = this.getActiveId();
-    if (activeId && this.get(activeId)) {
-      await this.updateCreds(activeId, fileCreds);
+    // Right after our own deploy, ~/.claude.json may still lag; trust the memo only
+    // while the credentials file is exactly the one we wrote.
+    const memo = this.memento.get<{ uuid?: string; credMtime?: number }>(ACTIVE_MEMO_KEY);
+    if (
+      memo?.uuid &&
+      this.accounts.has(memo.uuid) &&
+      memo.credMtime === this.credentials.mtimeMs()
+    ) {
+      this.activeUuid = memo.uuid;
+      return;
     }
+    this.activeUuid = undefined;
+  }
+
+  /** Records the account we just deployed so the UI is correct before the reload. */
+  async setActiveDeployed(uuid: string, ident: OAuthAccountInfo | undefined): Promise<void> {
+    this.activeUuid = uuid;
+    this.activeIdent = ident;
+    this.lastCredMtime = this.credentials.mtimeMs();
+    await this.memento.update(ACTIVE_MEMO_KEY, {
+      uuid,
+      credMtime: this.lastCredMtime,
+    });
+  }
+
+  async clearActive(): Promise<void> {
+    this.activeUuid = undefined;
+    this.activeIdent = undefined;
+    this.lastCredMtime = this.credentials.mtimeMs();
+    await this.memento.update(ACTIVE_MEMO_KEY, undefined);
+  }
+
+  activeAccountUuid(): string | undefined {
+    return this.activeUuid;
+  }
+
+  activeIdentity(): OAuthAccountInfo | undefined {
+    return this.activeIdent;
+  }
+
+  liveInstances(): InstanceInfo[] {
+    return this.instances;
+  }
+
+  // --- no-store fallback: cache the local account's usage in workspace state ---
+
+  localUsage(): UsageSnapshot | undefined {
+    return this.memento.get<UsageSnapshot>(LOCAL_USAGE_KEY);
+  }
+
+  async setLocalUsage(snapshot: UsageSnapshot): Promise<void> {
+    await this.memento.update(LOCAL_USAGE_KEY, snapshot);
+  }
+
+  // --- views for the UI ---
+
+  getUsageSnapshot(uuid: string): UsageSnapshot | undefined {
+    return this.usage.get(uuid)?.snapshot;
+  }
+
+  listViews(): AccountView[] {
+    if (!this.store) {
+      return this.localOnlyViews();
+    }
+    const others = this.instances.filter((i) => i.instanceId !== this.instanceId);
+    return [...this.accounts.values()]
+      .map((f) => this.toView(f, others))
+      .sort((a, b) => a.order - b.order);
+  }
+
+  private toView(f: AccountFile, others: InstanceInfo[]): AccountView {
+    const usable = f.credentials.filter((c) => !c.invalid);
+    const invalid = f.credentials.filter((c) => c.invalid);
+    return {
+      uuid: f.account.uuid,
+      email: f.account.email,
+      label: f.account.label,
+      order: f.account.order,
+      subscriptionType: f.account.subscriptionType,
+      updatesEnabled: f.account.updatesEnabled,
+      suspended: f.account.suspended,
+      parkedCount: usable.length,
+      invalidCount: invalid.length,
+      lastUsage: this.usage.get(f.account.uuid)?.snapshot,
+      isActive: this.activeUuid === f.account.uuid,
+      inUseByOthers: others
+        .filter((i) => i.activeAccountUuid === f.account.uuid)
+        .map((i) => i.workspaceName),
+    };
+  }
+
+  /** In no-store mode, surface just the locally logged-in account (if any). */
+  private localOnlyViews(): AccountView[] {
+    const ident = this.activeIdent;
+    if (!ident) {
+      return [];
+    }
+    return [
+      {
+        uuid: ident.accountUuid,
+        email: ident.emailAddress,
+        label: ident.emailAddress ?? "Current account",
+        order: 0,
+        subscriptionType: undefined,
+        updatesEnabled: true,
+        suspended: undefined,
+        parkedCount: 0,
+        invalidCount: 0,
+        lastUsage: this.localUsage(),
+        isActive: true,
+        inUseByOthers: [],
+      },
+    ];
   }
 }

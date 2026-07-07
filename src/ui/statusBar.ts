@@ -15,12 +15,17 @@ export class StatusBarController {
   }
 
   refresh(): void {
-    const activeId = this.store.getActiveId();
-    const active = activeId ? this.store.get(activeId) : undefined;
+    const active = this.store.listViews().find((v) => v.isActive);
 
     if (!active) {
-      this.item.text = "$(account) Claude: no account";
-      this.item.tooltip = "Click to add/switch a Claude account";
+      const ident = this.store.activeIdentity();
+      if (ident) {
+        this.item.text = `$(account) ${ident.emailAddress ?? "Claude"} (unsaved)`;
+        this.item.tooltip = "Logged in but not saved. Click to park or switch accounts.";
+      } else {
+        this.item.text = "$(account) Claude: no account";
+        this.item.tooltip = "Click to add/switch a Claude account";
+      }
       this.item.backgroundColor = undefined;
       return;
     }
@@ -31,6 +36,9 @@ export class StatusBarController {
     this.item.text = `$(account) ${active.label}${pctText}`;
 
     const lines = [`Active Claude account: ${active.label}`];
+    if (active.email) {
+      lines.push(`  ${active.email}`);
+    }
     if (usage) {
       for (const w of usage.windows) {
         lines.push(`  ${w.label}: ${w.percent}%`);
@@ -38,6 +46,14 @@ export class StatusBarController {
       if (usage.error) {
         lines.push(`  ⚠ ${usage.error}`);
       }
+    }
+    if (!active.updatesEnabled) {
+      lines.push("  ⏸ usage updates paused");
+    }
+    if (active.suspended) {
+      lines.push(
+        `  ⚠ updates suspended (${active.suspended.reason === "rate-limit" ? "rate limit" : "token invalid"})`
+      );
     }
     lines.push("Click to switch account.");
     this.item.tooltip = lines.join("\n");
