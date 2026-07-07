@@ -92,7 +92,28 @@ export function parseUsage(raw: RawUsage): UsageSnapshot {
     windows,
     sessionPercent: session ? session.percent : null,
     weeklyPercent: weekly ? weekly.percent : null,
+    cappedUntil: cappedUntilFrom(windows),
   };
+}
+
+/**
+ * If the 5h session or the 7d weekly window is maxed out (100%) and we know when it
+ * resets, returns the earliest such reset time (epoch ms). Polling pauses until then
+ * because usage can't grow past 100% before it resets. Model-specific weekly windows
+ * (Opus/Sonnet) are ignored — hitting one doesn't make the account unusable.
+ */
+export function cappedUntilFrom(windows: UsageWindow[]): number | undefined {
+  const resets: number[] = [];
+  for (const w of windows) {
+    const tracked = w.kind === "session" || w.kind === "weekly_all";
+    if (tracked && w.percent >= 100 && w.resetsAt) {
+      const t = Date.parse(w.resetsAt);
+      if (!isNaN(t)) {
+        resets.push(t);
+      }
+    }
+  }
+  return resets.length ? Math.min(...resets) : undefined;
 }
 
 export interface FetchResult {
@@ -136,6 +157,11 @@ export function isDue(now: number, intervalMs: number, usage: UsageFile | null |
   if (retryAfter > now) {
     return false;
   }
+  // Maxed-out window: nothing changes until it resets — pause auto-polling until then.
+  const cappedUntil = usage?.snapshot?.cappedUntil ?? 0;
+  if (cappedUntil > now) {
+    return false;
+  }
   const fetchedAt = usage?.snapshot?.fetchedAt ?? 0;
   const lastAttempt = usage?.lastAttemptAt ?? 0;
   return now - Math.max(fetchedAt, lastAttempt) >= intervalMs;
@@ -169,6 +195,8 @@ export function errorSnapshot(
     error: result.error ?? "Failed to fetch usage",
     errorAt: now,
     retryAfter,
+    // Keep any maxed-out cap so a failed manual poll doesn't resume auto-polling early.
+    cappedUntil: prev?.cappedUntil && prev.cappedUntil > now ? prev.cappedUntil : undefined,
   };
 }
 
@@ -610,6 +638,9 @@ export class UsagePoller {
       );
       this.onUpdate();
       return;
+    }
+    if (!force && prev?.cappedUntil && prev.cappedUntil > now) {
+      return; // maxed out — wait for reset (manual refresh still works)
     }
     if (!force && prev && now - prev.fetchedAt < this.intervalMs()) {
       return;

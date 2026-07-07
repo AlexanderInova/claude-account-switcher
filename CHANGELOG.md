@@ -36,7 +36,11 @@ Reworked for running many windows/devcontainers at once.
   this window (signs out here) or the parked ones (only asked when parked credentials exist), each
   behind a confirmation. Deleting the local credential no longer silently reappears on the next poll.
 - **UI polish.** The active account is always listed first, and usage bars use a neutral track so the
-  green/amber/red fill stays legible in both light and dark themes.
+  green/amber/red fill stays legible in both light and dark themes. Relative times (resets, last
+  update) now have tooltips showing the absolute local time.
+- **Pause polling at 100%.** When an account's 5h session or 7d weekly window hits 100%, automatic
+  refreshing stops until that window resets (there is nothing new to learn until then), saving API
+  calls. The footer shows "⏸ paused until reset"; a manual ⟳ still refreshes.
 
 ## 0.1.0
 

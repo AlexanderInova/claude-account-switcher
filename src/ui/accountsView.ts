@@ -24,6 +24,7 @@ interface ViewAccount {
   error?: string;
   errorAt?: number;
   fetchedAt?: number;
+  cappedUntil?: number;
   ephemeral?: boolean;
 }
 
@@ -102,6 +103,7 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
       error: v.lastUsage?.error,
       errorAt: v.lastUsage?.errorAt,
       fetchedAt: v.lastUsage?.fetchedAt,
+      cappedUntil: v.lastUsage?.cappedUntil,
       ephemeral: v.ephemeral,
     }));
 

@@ -197,9 +197,17 @@
     const foot = document.createElement("div");
     foot.className = "sub";
     foot.style.marginTop = "6px";
-    foot.textContent = acc.error ? fmtAgo(acc.fetchedAt, "data from") : fmtAgo(acc.fetchedAt, "updated");
+    let footText = acc.error ? fmtAgo(acc.fetchedAt, "data from") : fmtAgo(acc.fetchedAt, "updated");
+    const titleParts = [];
     const absFetched = fmtAbsolute(acc.fetchedAt);
-    if (absFetched) foot.title = "Last successful update: " + absFetched;
+    if (absFetched) titleParts.push("Last successful update: " + absFetched);
+    if (acc.cappedUntil && acc.cappedUntil > Date.now()) {
+      footText += " · ⏸ paused until reset";
+      const absCap = fmtAbsolute(acc.cappedUntil);
+      if (absCap) titleParts.push("Auto-refresh paused until " + absCap + " (100% reached). Use ⟳ to refresh now.");
+    }
+    foot.textContent = footText;
+    if (titleParts.length) foot.title = titleParts.join("\n");
     el.appendChild(foot);
 
     const actions = document.createElement("div");

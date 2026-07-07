@@ -48,6 +48,12 @@ export interface UsageSnapshot {
   errorAt?: number;
   /** earliest time a retry is allowed (epoch ms) — backoff on 429 */
   retryAfter?: number;
+  /**
+   * When a tracked window (5h session or 7d weekly) is at 100%, the earliest reset
+   * time (epoch ms) among those maxed windows. Automatic polling pauses until then —
+   * there is nothing new to learn until the limit resets. Manual refresh still works.
+   */
+  cappedUntil?: number;
 }
 
 /** Why an account's automatic updates are currently suspended. */

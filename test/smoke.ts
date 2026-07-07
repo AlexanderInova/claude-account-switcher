@@ -91,6 +91,39 @@ async function main(): Promise<void> {
       },
     }) === false
   );
+  check(
+    "not due while capped at 100% until reset",
+    isDue(now, interval, {
+      rev: 1,
+      updatedAt: now,
+      lastAttemptAt: 0,
+      snapshot: { fetchedAt: 0, windows: [], sessionPercent: 100, weeklyPercent: null, cappedUntil: now + 3_600_000 },
+    }) === false
+  );
+  check(
+    "due again once the cap has passed",
+    isDue(now, interval, {
+      rev: 1,
+      updatedAt: now,
+      lastAttemptAt: 0,
+      snapshot: { fetchedAt: 0, windows: [], sessionPercent: 100, weeklyPercent: null, cappedUntil: now - 1000 },
+    }) === true
+  );
+
+  console.log("cappedUntil from a maxed window:");
+  const capReset = "2999-01-01T00:00:00.000Z";
+  const capped = parseUsage({
+    limits: [{ kind: "session", group: "session", percent: 100, resets_at: capReset }],
+  } as never);
+  check("session at 100% sets cappedUntil to its reset", capped.cappedUntil === Date.parse(capReset));
+  const notCapped = parseUsage({
+    limits: [{ kind: "session", group: "session", percent: 100, resets_at: null }],
+  } as never);
+  check("no cap when reset time unknown", notCapped.cappedUntil === undefined);
+  const opusMaxed = parseUsage({
+    limits: [{ kind: "weekly_opus", group: "weekly", percent: 100, resets_at: capReset }],
+  } as never);
+  check("model-specific weekly (Opus) at 100% does not cap", opusMaxed.cappedUntil === undefined);
 
   console.log("errorSnapshot preserves prior data:");
   const prev: UsageSnapshot = {
