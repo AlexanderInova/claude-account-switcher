@@ -300,6 +300,39 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   context.subscriptions.push(
+    vscode.commands.registerCommand("claudeSwitcher.validateParked", async () => {
+      if (!store) {
+        vscode.window.showWarningMessage(
+          "Testing parked credentials needs a shared store. Enable claudeSwitcher.sync.enabled or set claudeSwitcher.sync.folder."
+        );
+        return;
+      }
+      const parked = accountStore.listViews().reduce((n, v) => n + v.parkedCount + v.invalidCount, 0);
+      if (parked === 0) {
+        vscode.window.showInformationMessage("No parked credentials to test.");
+        return;
+      }
+      const confirm = await vscode.window.showWarningMessage(
+        `Test all ${parked} parked credential${parked === 1 ? "" : "s"}? Invalid ones are permanently removed. This makes a network request per credential.`,
+        { modal: true },
+        "Test"
+      );
+      if (confirm !== "Test") {
+        return;
+      }
+      const res = await vscode.window.withProgress(
+        { location: { viewId: AccountsViewProvider.viewType }, title: "Testing parked credentials…" },
+        () => poller.validateParkedCredentials()
+      );
+      refreshUI();
+      const bits = [`tested ${res.tested}`, `dropped ${res.dropped}`, `kept ${res.kept}`];
+      if (res.transient) bits.push(`${res.transient} inconclusive`);
+      if (res.rateLimited) bits.push("stopped early (rate limit)");
+      vscode.window.showInformationMessage("Parked credentials: " + bits.join(", ") + ".");
+    })
+  );
+
+  context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.undoSwitch", async () => {
       const res = await switchService.undoSwitch();
       refreshUI();

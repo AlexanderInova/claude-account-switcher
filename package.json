@@ -85,6 +85,11 @@
         "title": "Claude: Pause/resume usage updates for account"
       },
       {
+        "command": "claudeSwitcher.validateParked",
+        "title": "Claude: Test parked credentials (drop invalid)",
+        "icon": "$(beaker)"
+      },
+      {
         "command": "claudeSwitcher.undoSwitch",
         "title": "Claude: Undo last switch"
       },
@@ -104,6 +109,11 @@
           "command": "claudeSwitcher.refreshUsage",
           "when": "view == claudeSwitcher.accountsView",
           "group": "navigation@2"
+        },
+        {
+          "command": "claudeSwitcher.validateParked",
+          "when": "view == claudeSwitcher.accountsView",
+          "group": "navigation@3"
         }
       ],
       "commandPalette": [
@@ -115,6 +125,9 @@
         },
         {
           "command": "claudeSwitcher.toggleAccountUpdates"
+        },
+        {
+          "command": "claudeSwitcher.validateParked"
         }
       ]
     },

@@ -6,7 +6,14 @@ import { acquireLock, releaseLock, withLock } from "../src/lockFile";
 import { refreshTokenHash, SecretVault, SecretStorageLike } from "../src/secretVault";
 import { SharedStore } from "../src/store";
 import { AccountFile, OAuthCreds, UsageSnapshot } from "../src/types";
-import { errorSnapshot, isDue, parseUsage, pickFreeCredential } from "../src/usage";
+import {
+  errorSnapshot,
+  isDue,
+  parseUsage,
+  pickFreeCredential,
+  verdictFromRefresh,
+  verdictFromStatus,
+} from "../src/usage";
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -159,6 +166,16 @@ async function main(): Promise<void> {
       now + 130_000
     )?.id === "c2"
   );
+
+  console.log("parked-credential validity verdicts:");
+  check("refresh ok -> valid", verdictFromRefresh({ ok: true }) === "valid");
+  check("refresh terminal -> invalid", verdictFromRefresh({ ok: false, terminal: true }) === "invalid");
+  check("refresh transient -> transient", verdictFromRefresh({ ok: false, terminal: false }) === "transient");
+  check("401 -> invalid", verdictFromStatus(401) === "invalid");
+  check("403 -> invalid", verdictFromStatus(403) === "invalid");
+  check("200 -> valid", verdictFromStatus(200) === "valid");
+  check("429 -> transient", verdictFromStatus(429) === "transient");
+  check("500 -> transient", verdictFromStatus(500) === "transient");
 
   console.log("SecretVault + hash:");
   const vault = new SecretVault(memSecrets());

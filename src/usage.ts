@@ -174,6 +174,28 @@ export function pickFreeCredential(file: AccountFile, now: number): CredentialRe
   );
 }
 
+/** Validity verdict for a parked credential being tested. */
+export type Verdict = "valid" | "invalid" | "transient";
+
+/** Verdict from a refresh attempt: ok = valid, terminal (invalid_grant/400/401) = invalid. */
+export function verdictFromRefresh(r: { ok: boolean; terminal?: boolean }): Verdict {
+  if (r.ok) {
+    return "valid";
+  }
+  return r.terminal ? "invalid" : "transient";
+}
+
+/** Verdict from an authenticated GET status: 401/403 = invalid, 200 = valid, else transient. */
+export function verdictFromStatus(status: number): Verdict {
+  if (status === 401 || status === 403) {
+    return "invalid";
+  }
+  if (status === 200) {
+    return "valid";
+  }
+  return "transient";
+}
+
 /** Builds an error snapshot that preserves the previous data and its fetch time. */
 export function errorSnapshot(
   prev: UsageSnapshot | undefined,
@@ -619,6 +641,121 @@ export class UsagePoller {
       }
       this.store!.writeAccount(file);
     });
+  }
+
+  /** Removes a parked credential (reference + secret blob). Keeps the account entry. */
+  private async dropParkedCredential(uuid: string, credId: string): Promise<void> {
+    if (!this.store) {
+      return;
+    }
+    await this.store.withAccountLock(uuid, () => {
+      const file = this.store!.readAccount(uuid);
+      if (!file) {
+        return;
+      }
+      file.credentials = file.credentials.filter((c) => c.id !== credId);
+      this.store!.writeAccount(file);
+    });
+    await this.vault.remove(credId);
+  }
+
+  /**
+   * Probes every parked credential and drops the ones that are definitively invalid
+   * (401/403 on use, or invalid_grant on refresh). Transient failures (429/network/5xx)
+   * never drop. Never touches the credential currently deployed locally. Stops early on
+   * a 429 to respect the rate limit.
+   */
+  async validateParkedCredentials(): Promise<{
+    tested: number;
+    dropped: number;
+    kept: number;
+    transient: number;
+    rateLimited: boolean;
+  }> {
+    const result = { tested: 0, dropped: 0, kept: 0, transient: 0, rateLimited: false };
+    if (!this.store) {
+      return result;
+    }
+    const local = this.credentials.readCurrent();
+    const localHash = local ? refreshTokenHash(local) : undefined;
+
+    for (const account of this.store.listAccounts()) {
+      const uuid = account.account.uuid;
+      // Snapshot the ids to test; re-read live state under the lock when claiming.
+      for (const credId of account.credentials.map((c) => c.id)) {
+        if (result.rateLimited) {
+          break;
+        }
+        const now = Date.now();
+        const claim = await this.store.withAccountLock(uuid, () => {
+          const file = this.store!.readAccount(uuid);
+          const ref = file?.credentials.find((c) => c.id === credId);
+          if (!file || !ref) {
+            return undefined;
+          }
+          if (ref.lease && now - ref.lease.at <= LEASE_STALE_MS) {
+            return undefined; // in use elsewhere
+          }
+          if (localHash && ref.refreshTokenHash === localHash) {
+            return undefined; // never probe the live grant
+          }
+          ref.lease = { instanceId: this.instanceId, at: now };
+          this.store!.writeAccount(file);
+          return { hash: ref.refreshTokenHash };
+        });
+        if (!claim) {
+          continue;
+        }
+
+        result.tested++;
+        const verdict = await this.probeCredential(uuid, credId, claim.hash);
+        if (verdict === "invalid") {
+          await this.dropParkedCredential(uuid, credId);
+          result.dropped++;
+        } else if (verdict === "valid") {
+          await this.clearLease(uuid, credId);
+          result.kept++;
+        } else {
+          await this.clearLease(uuid, credId);
+          result.transient++;
+          if (verdict === "transient-429") {
+            result.rateLimited = true;
+          }
+        }
+      }
+      if (result.rateLimited) {
+        break;
+      }
+    }
+    this.onUpdate();
+    return result;
+  }
+
+  /** Probes one leased parked credential. Returns its verdict (429 flagged separately). */
+  private async probeCredential(
+    uuid: string,
+    credId: string,
+    hash: string
+  ): Promise<Verdict | "transient-429"> {
+    const creds = await this.vault.getVerified(credId, hash);
+    if (!creds) {
+      // Blob truly gone → orphan ref, invalid. Hash mismatch → transient.
+      return (await this.vault.get(credId)) === null ? "invalid" : "transient";
+    }
+    if (TokenRefresher.isExpired(creds)) {
+      const r = await this.refresher.refresh(creds);
+      const verdict = verdictFromRefresh(r);
+      if (verdict === "valid" && r.creds) {
+        await this.vault.put(credId, r.creds); // persist the rotated token
+        await this.updateRefTokens(uuid, credId, r.creds);
+      }
+      return verdict;
+    }
+    const res = await fetchUsage(creds);
+    if (res.status === 429) {
+      return "transient-429";
+    }
+    return verdictFromStatus(res.status);
   }
 
   // --- no-store fallback ---

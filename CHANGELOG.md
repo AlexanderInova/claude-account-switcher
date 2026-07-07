@@ -41,6 +41,10 @@ Reworked for running many windows/devcontainers at once.
 - **Pause polling at 100%.** When an account's 5h session or 7d weekly window hits 100%, automatic
   refreshing stops until that window resets (there is nothing new to learn until then), saving API
   calls. The footer shows "⏸ paused until reset"; a manual ⟳ still refreshes.
+- **Test parked credentials.** A new command (and 🧪 toolbar button) "Test parked credentials (drop
+  invalid)" probes every parked credential and permanently removes the ones that are definitively
+  invalid (401/403 on use, or `invalid_grant` on refresh). Transient failures (429/network/5xx) are
+  never dropped; it stops early on a rate limit and never touches the credential in use in this window.
 - **Fixed stale usage flicker.** Concurrent windows could momentarily overwrite an account's usage
   with an older or empty snapshot (the file's revision could even run backwards), so wrong/earlier
   values appeared until the next refresh. Usage writes are now monotonic — an older or empty snapshot
