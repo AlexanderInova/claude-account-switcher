@@ -74,39 +74,65 @@ and rate-limit hits. `CAS_LOG_LEVEL=DEBUG` shows the full lock/usage churn;
 
 ### Azure Container Registry, multi-arch (amd64 + Apple-Silicon arm64)
 
-One image that runs natively on x86 servers *and* ARM Macs. `docker buildx` builds both
-platforms and pushes a combined manifest in one step (the classic `docker build`/`push`
-only produces the architecture you ran it on):
+One image that runs natively on x86 servers *and* ARM Macs. Because a default Docker
+setup answers `docker buildx build --platform …` with *"Multi-platform build is not
+supported for the docker driver"*, the repo ships a self-contained builder that runs the
+whole thing in a **temporary docker-in-docker container** — nothing on your host Docker
+is reconfigured, and your registry login is inherited from outside (mounted
+`~/.docker/config.json`, plus an ACR token fetched via `az` when Docker Desktop keeps
+the credentials in a host-only helper):
 
 ```bash
-az acr login --name auexprod           # or: docker login auexprod.azurecr.io
+az login                       # once, if needed
+cd server
+./build-multiarch.sh 0.2.2 myregistry.azurecr.io/claude-account-switcher-sync
+# builds amd64+arm64 and pushes …:0.2.2 + :latest
+```
 
-# one-time: a builder that can target multiple platforms
-docker buildx create --use --name multiarch
+Expected output ends with the pushed manifest listing both `linux/amd64` and
+`linux/arm64`. Variants: `DRY_RUN=1 ./build-multiarch.sh <version> <image>` builds both
+platforms without pushing (smoke test); `ACR_TOKEN=…` supplies credentials explicitly
+(e.g. CI: `az acr login --name myregistry --expose-token --output tsv --query accessToken`).
 
+**MTU**: VPNs and Azure networks often carry less than the Ethernet default of 1500
+bytes per packet; nested Docker layers that assume 1500 then stall with *"TLS handshake
+timeout"* on registry pulls. The builder therefore pins **1360** end to end (the DinD
+container's network, the inner daemon, and BuildKit via host networking). Override with
+`MTU=… ./build-multiarch.sh <version> <image>` if your network needs a different value
+(`MTU=1500` on an unconstrained LAN).
+
+<details><summary>Manual alternative (persistent buildx builder on the host)</summary>
+
+```bash
+az acr login --name myregistry
+docker buildx create --use --name multiarch   # one-time; uses the docker-container driver
 cd server
 docker buildx build \
   --platform linux/amd64,linux/arm64 \
-  -t auexprod.azurecr.io/claude-account-switcher-sync:0.2.2 \
-  -t auexprod.azurecr.io/claude-account-switcher-sync:latest \
+  -t myregistry.azurecr.io/claude-account-switcher-sync:0.2.2 \
+  -t myregistry.azurecr.io/claude-account-switcher-sync:latest \
   --push .
-
-# verify both architectures landed
-docker buildx imagetools inspect auexprod.azurecr.io/claude-account-switcher-sync:0.2.2
+docker buildx imagetools inspect myregistry.azurecr.io/claude-account-switcher-sync:0.2.2
 ```
+
+The `buildx create` line is what avoids the "not supported for the docker driver" error —
+it creates a builder with the `docker-container` driver, which can assemble multi-platform
+manifests. On plain Linux hosts you may also need QEMU once:
+`docker run --privileged --rm tonistiigi/binfmt --install all`.
+</details>
 
 Every machine — Intel/AMD or ARM Mac — then pulls the right variant automatically:
 
 ```yaml
 services:
   sync:
-    image: auexprod.azurecr.io/claude-account-switcher-sync:0.2.2
+    image: myregistry.azurecr.io/claude-account-switcher-sync:0.2.2
     # (replaces `build: .`; the rest of docker-compose.yml stays the same)
 ```
 
 Notes: keep the tag in sync with the `pyproject.toml` version; the base image
 (`python:3.12-slim`) and all dependencies ship arm64 wheels, so no Dockerfile changes are
-needed; pulling machines authenticate once with `az acr login --name auexprod` (or a
+needed; pulling machines authenticate once with `az acr login --name myregistry` (or a
 registry token/service principal on headless boxes).
 
 ### Other registries (Docker Hub / GHCR)
