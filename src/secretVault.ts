@@ -25,7 +25,41 @@ export interface SecretStorageLike {
   delete(key: string): Thenable<void> | Promise<void>;
 }
 
-export class SecretVault {
+/**
+ * The token-store seam. `SecretVault` keeps blobs in machine-local SecretStorage
+ * (folder sync); `RemoteVault` (serverSync/remoteVault.ts) keeps them E2E-encrypted
+ * on the sync server so every machine can reach them.
+ */
+export interface TokenVault {
+  put(id: string, creds: OAuthCreds): Promise<void>;
+  get(id: string): Promise<OAuthCreds | null>;
+  remove(id: string): Promise<void>;
+  getVerified(id: string, expectedHash: string): Promise<OAuthCreds | null>;
+}
+
+/**
+ * Reads a credential and checks it still matches the reference's hash.
+ * Secret propagation is eventually consistent (cross-window SecretStorage, or a
+ * just-pushed server blob), so on mismatch we retry once before giving up.
+ */
+export async function getVerifiedFrom(
+  vault: Pick<TokenVault, "get">,
+  id: string,
+  expectedHash: string
+): Promise<OAuthCreds | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const creds = await vault.get(id);
+    if (creds && refreshTokenHash(creds) === expectedHash) {
+      return creds;
+    }
+    if (attempt === 0) {
+      await new Promise((r) => setTimeout(r, 200));
+    }
+  }
+  return null;
+}
+
+export class SecretVault implements TokenVault {
   constructor(private readonly secrets: SecretStorageLike) {}
 
   async put(id: string, creds: OAuthCreds): Promise<void> {
@@ -52,21 +86,7 @@ export class SecretVault {
     }
   }
 
-  /**
-   * Reads a credential and checks it still matches the reference's hash.
-   * Cross-window secret propagation is eventually consistent, so on mismatch we
-   * retry once after a short delay before giving up.
-   */
-  async getVerified(id: string, expectedHash: string): Promise<OAuthCreds | null> {
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const creds = await this.get(id);
-      if (creds && refreshTokenHash(creds) === expectedHash) {
-        return creds;
-      }
-      if (attempt === 0) {
-        await new Promise((r) => setTimeout(r, 200));
-      }
-    }
-    return null;
+  getVerified(id: string, expectedHash: string): Promise<OAuthCreds | null> {
+    return getVerifiedFrom(this, id, expectedHash);
   }
 }

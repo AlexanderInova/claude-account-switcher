@@ -1,0 +1,15 @@
+services:
+  sync:
+    build: .
+    ports:
+      - "8787:8787"
+    volumes:
+      - cas-data:/data
+    environment:
+      # Uncomment to require a token for new-user registration:
+      # CAS_REGISTRATION_TOKEN: "choose-a-token"
+      CAS_DB_PATH: /data/switcher.db
+    restart: unless-stopped
+
+volumes:
+  cas-data:

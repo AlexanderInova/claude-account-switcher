@@ -75,9 +75,32 @@ automatically so the folder is never committed.
 Notes and limits:
 
 - A store folder coordinates windows of **one machine** (the ids resolve against that machine's
-  secret store).
+  secret store). To coordinate **across machines**, use the sync server below.
 - If no store is available (sync disabled, or the folder isn't writable), switching is disabled and
   the panel shows only the account currently logged in to this window, with its usage.
+
+### The sync server (multi-machine)
+
+Set `claudeSwitcher.sync.mode` to `server` to coordinate through a small self-hosted service
+instead of a folder — this lets **multiple machines** share one account pool. See
+[server/README.md](server/README.md) for running it (bare Python or `docker compose up`; data
+persists in a volume; one SQLite file to back up).
+
+- **End-to-end encrypted.** Token blobs are encrypted on your machine (AES-256-GCM) with a key
+  derived from your passphrase (scrypt → HKDF); the server only ever stores ciphertext. A sibling
+  derivation of the same passphrase is the login credential, so a wrong passphrase is a plain 401 —
+  you cannot accidentally read or write someone else's pool.
+- **Multi-user.** Each user id (e.g. your email) is an isolated pool. A team can share one pool by
+  sharing the user id + passphrase.
+- **Unlock once per machine.** `Claude: Unlock sync server…` asks for the passphrase (first time:
+  offers to register), derives the keys, and stores only the derived keys in SecretStorage — the
+  passphrase itself is never persisted. `Claude: Lock sync server` forgets them.
+- **Folder import.** If a folder store with parked accounts is found while server mode is active,
+  the extension offers to upload it (also available as `Claude: Migrate folder store to sync
+  server…`). A successful upload stamps the folder with a `.migrated` marker so it can't be used
+  accidentally afterwards; delete the marker to reactivate the folder.
+- **Offline behavior.** If the server is unreachable, windows keep showing the last known state
+  (marked as stale) and recover automatically; nothing is lost.
 
 ## Usage
 
@@ -98,6 +121,9 @@ Notes and limits:
 | `Claude: Pause/resume usage updates for account` | stop/resume automatic polling for one account |
 | `Claude: Undo last switch` | switch back to the previously active account |
 | `Claude: Remove / Rename account profile` | manage profiles |
+| `Claude: Unlock sync server…` | enter the passphrase for server sync (registers on first use) |
+| `Claude: Lock sync server (forget keys)` | drop the derived keys from this machine |
+| `Claude: Migrate folder store to sync server…` | upload a folder store, then retire it (`.migrated`) |
 
 ## Settings
 
@@ -105,17 +131,21 @@ Notes and limits:
 | --- | --- | --- |
 | `claudeSwitcher.pollIntervalSeconds` | `240` | group-wide per-account freshness target (min 180) |
 | `claudeSwitcher.autoSuspend` | `true` | auto-suspend an account after a 429 or dead token (until Retry) |
-| `claudeSwitcher.sync.enabled` | `true` | coordinate via the shared folder (off = local-only) |
+| `claudeSwitcher.sync.enabled` | `true` | coordinate via a shared store (off = local-only) |
+| `claudeSwitcher.sync.mode` | `"folder"` | `folder` (one machine) or `server` (multi-machine) |
 | `claudeSwitcher.sync.folder` | `""` | explicit shared-folder path (empty = auto-detect) |
+| `claudeSwitcher.sync.server.url` | `""` | sync-server base URL (server mode) |
+| `claudeSwitcher.sync.server.user` | `""` | your user id on the sync server (server mode) |
 | `claudeSwitcher.autoReloadAfterSwitch` | `false` | auto-reload the window after switching |
 | `claudeSwitcher.credentialsPath` | `""` | override the path to `.credentials.json` |
 | `claudeSwitcher.warnThresholdPercent` | `80` | warning threshold (% → red bar) |
 
 ## Security and disclaimers
 
-- OAuth tokens are stored only in VS Code's **encrypted `SecretStorage`**. The shared folder holds
-  only metadata, random ids, and usage — **no token material** — and is created with restrictive
-  permissions (`0600`/`0700`).
+- OAuth tokens are stored only in VS Code's **encrypted `SecretStorage`** (folder mode) or
+  **end-to-end encrypted on your own sync server** (server mode — the server never sees a key or a
+  plaintext token). The shared folder holds only metadata, random ids, and usage — **no token
+  material** — and is created with restrictive permissions (`0600`/`0700`).
 - The extension never sends tokens anywhere except the official Anthropic endpoints, and never
   refreshes the token Claude Code is actively using in a window.
 - This tool is for managing **your own** accounts.
@@ -136,9 +166,16 @@ polled. The old per-profile storage is then cleared.
 npm install
 npm run watch       # build in watch mode
 # press F5 in VS Code -> Extension Development Host
-npm run typecheck   # type-check
-npm run test:smoke  # pure-logic tests (locks, store, usage, credentials)
-npm run build:vsix  # build the .vsix package
+npm run typecheck          # type-check
+npm run test:smoke         # pure-logic tests (locks, store, usage, credentials)
+npm run test:server-smoke  # sync-server client layer against an in-memory fake server
+npm run build:vsix         # build the .vsix package
+
+# contract test: the same suite against the real Python server
+(cd server && uv venv && uv pip install -e ".[test]" && .venv/bin/python -m pytest tests)
+(cd server && CAS_DB_PATH=/tmp/cas.db CAS_PORT=18787 CAS_RATE_AUTH_PER_MIN=100000 \
+  .venv/bin/python -m uvicorn --factory claude_switcher_sync.app:app_factory --port 18787 &) \
+  && SERVER_URL=http://127.0.0.1:18787 npm run test:server-smoke
 ```
 
 ## License

@@ -13,3 +13,7 @@ tsconfig.json
 !dist/**
 .github/**
 scratch/**
+server/**
+**/.venv/**
+**/__pycache__/**
+.claude-account-switcher/**

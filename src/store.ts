@@ -3,9 +3,7 @@ import * as path from "path";
 import { writeFileAtomic } from "./atomicWrite";
 import { AccountFile, InstanceInfo, UsageFile } from "./types";
 import { withLock } from "./lockFile";
-
-/** Live instances whose heartbeat is older than this are considered dead. */
-const INSTANCE_STALE_MS = 90_000;
+import { INSTANCE_STALE_MS, StoreWatcher, SyncStore } from "./syncStore";
 
 /**
  * The shared, file-backed coordination store (one directory, typically shared
@@ -16,11 +14,15 @@ const INSTANCE_STALE_MS = 90_000;
  * All writes are atomic (tmp + rename). All reads tolerate parse errors and a
  * concurrent writer by returning null, so callers keep their last good state.
  */
-export class SharedStore {
+export class SharedStore implements SyncStore {
   constructor(private readonly dir: string) {}
 
   get root(): string {
     return this.dir;
+  }
+
+  async init(): Promise<void> {
+    this.ensureLayout();
   }
 
   private sub(name: string): string {
@@ -105,14 +107,14 @@ export class SharedStore {
   }
 
   /** Writes an account file, bumping rev + updatedAt. */
-  writeAccount(file: AccountFile): void {
+  async writeAccount(file: AccountFile): Promise<void> {
     file.rev = (file.rev ?? 0) + 1;
     file.updatedAt = Date.now();
     file.version = 1;
     this.writeJson(this.accountPath(file.account.uuid), file);
   }
 
-  deleteAccount(uuid: string): void {
+  async deleteAccount(uuid: string): Promise<void> {
     try {
       fs.unlinkSync(this.accountPath(uuid));
     } catch {
@@ -150,7 +152,7 @@ export class SharedStore {
    *   only `lastAttemptAt` advances. Equal `fetchedAt` (error/claim bookkeeping writes)
    *   still applies. Containers share one host clock, so `fetchedAt` is a safe key.
    */
-  writeUsage(uuid: string, file: UsageFile): void {
+  async writeUsage(uuid: string, file: UsageFile): Promise<void> {
     const current = this.readUsage(uuid);
     const keepCurrent =
       !!current && current.snapshot.fetchedAt > (file.snapshot?.fetchedAt ?? 0);
@@ -174,7 +176,7 @@ export class SharedStore {
     return c?.cooldownUntil ?? 0;
   }
 
-  setCooldownUntil(until: number): void {
+  async setCooldownUntil(until: number): Promise<void> {
     try {
       this.writeJson(this.cooldownPath(), { cooldownUntil: until });
     } catch {
@@ -188,7 +190,7 @@ export class SharedStore {
     return path.join(this.sub("instances"), instanceId + ".json");
   }
 
-  writeInstance(info: InstanceInfo): void {
+  async writeInstance(info: InstanceInfo): Promise<void> {
     try {
       this.writeJson(this.instancePath(info.instanceId), info);
     } catch {
@@ -196,7 +198,7 @@ export class SharedStore {
     }
   }
 
-  removeInstance(instanceId: string): void {
+  async removeInstance(instanceId: string): Promise<void> {
     try {
       fs.unlinkSync(this.instancePath(instanceId));
     } catch {
@@ -268,7 +270,7 @@ export class SharedStore {
   }
 
   /** Watches the store dirs; `onChange` fires (debounced by the caller) on any change. */
-  watch(onChange: () => void): fs.FSWatcher[] {
+  watch(onChange: () => void): StoreWatcher[] {
     const watchers: fs.FSWatcher[] = [];
     for (const s of ["accounts", "usage", "instances"]) {
       try {
