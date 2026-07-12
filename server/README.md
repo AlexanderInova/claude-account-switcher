@@ -58,6 +58,43 @@ Interactive API docs at `http://localhost:8787/docs`.
 | `CAS_RATE_AUTH_PER_MIN` | `600` | Per-user request limit (~16 req/min per open window) |
 | `CAS_RATE_UNAUTH_PER_MIN` | `10` | Per-IP limit for register/salt lookups |
 | `CAS_ACCESS_LOG` | `0` | Set `1` to log every request (noisy: clients poll every 5s) |
+| `CAS_LOG_LEVEL` | `INFO` | Event-log level (`DEBUG` adds usage writes + lock cycles) |
+
+## Logging
+
+By default the server logs **events, not requests**: startup config, registrations,
+account writes that changed something (park/deploy/rename/delete — lease bookkeeping is
+`DEBUG`), windows joining/leaving/switching accounts (keep-alive heartbeats are silent),
+secret stores/deletes (ids and ciphertext size only — never content), stolen locks (a
+window died mid-operation), Anthropic-429 cooldowns, and — at `WARNING` — auth failures
+and rate-limit hits. `CAS_LOG_LEVEL=DEBUG` shows the full lock/usage churn;
+`CAS_ACCESS_LOG=1` additionally re-enables uvicorn's raw request log.
+
+## Publishing the image
+
+```bash
+cd server
+docker build -t claude-switcher-sync:0.2.2 .          # keep the tag = pyproject version
+
+# Docker Hub
+docker tag claude-switcher-sync:0.2.2 YOURUSER/claude-switcher-sync:0.2.2
+docker tag claude-switcher-sync:0.2.2 YOURUSER/claude-switcher-sync:latest
+docker login
+docker push YOURUSER/claude-switcher-sync:0.2.2
+docker push YOURUSER/claude-switcher-sync:latest
+
+# GitHub Container Registry (PAT needs the write:packages scope)
+docker tag claude-switcher-sync:0.2.2 ghcr.io/YOURUSER/claude-switcher-sync:0.2.2
+echo "$GITHUB_PAT" | docker login ghcr.io -u YOURUSER --password-stdin
+docker push ghcr.io/YOURUSER/claude-switcher-sync:0.2.2
+
+# Multi-arch (amd64 + arm64 — e.g. to run on a Pi/NAS), builds and pushes in one step:
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/YOURUSER/claude-switcher-sync:0.2.2 --push .
+```
+
+Machines that consume the published image use `image:` instead of `build:` in
+`docker-compose.yml` (see the commented line there).
 
 ## Using it from VS Code
 

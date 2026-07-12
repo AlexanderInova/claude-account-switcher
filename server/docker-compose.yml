@@ -1,6 +1,9 @@
 services:
   sync:
     build: .
+    # When consuming a published image instead of building locally, replace
+    # `build: .` with (see README "Publishing the image"):
+    # image: ghcr.io/YOURUSER/claude-switcher-sync:0.2.2
     ports:
       - "8787:8787"
     volumes:

@@ -139,12 +139,19 @@ class Database:
 
     # --- accounts ---
 
-    def put_account(self, user_id: str, uuid: str, doc: dict) -> tuple[int, dict]:
-        """Stores the doc; the server owns `rev`/`updatedAt`/`version`."""
+    def put_account(
+        self, user_id: str, uuid: str, doc: dict
+    ) -> tuple[int, dict, Optional[dict]]:
+        """Stores the doc; the server owns `rev`/`updatedAt`/`version`.
+
+        Also returns the previous doc (None on create) so the route can tell a
+        meaningful change (park/deploy/rename) from lease bookkeeping when logging.
+        """
         with self._tx() as c:
             row = c.execute(
-                "SELECT rev FROM accounts WHERE user_id = ? AND uuid = ?", (user_id, uuid)
+                "SELECT rev, doc FROM accounts WHERE user_id = ? AND uuid = ?", (user_id, uuid)
             ).fetchone()
+            prev = json.loads(row["doc"]) if row else None
             rev = (int(row["rev"]) if row else 0) + 1
             doc = {**doc, "rev": rev, "updatedAt": now_ms(), "version": 1}
             c.execute(
@@ -154,7 +161,7 @@ class Database:
                 (user_id, uuid, json.dumps(doc), rev, doc["updatedAt"]),
             )
             pool = self._bump_rev(c, user_id)
-        return pool, doc
+        return pool, doc, prev
 
     def get_account(self, user_id: str, uuid: str) -> Optional[dict]:
         with self._tx() as c:
@@ -174,7 +181,11 @@ class Database:
 
     # --- usage (monotonic merge, verbatim SharedStore.writeUsage rules) ---
 
-    def put_usage(self, user_id: str, uuid: str, doc: dict) -> tuple[int, dict]:
+    def put_usage(
+        self, user_id: str, uuid: str, doc: dict
+    ) -> tuple[int, dict, Optional[dict]]:
+        """Returns (pool_rev, merged_doc, prev_snapshot) — prev lets the route tell a
+        real usage update / new error apart from claim bookkeeping when logging."""
         incoming_snapshot = doc.get("snapshot") or {}
         incoming_fetched = int(incoming_snapshot.get("fetchedAt") or 0)
         incoming_attempt = int(doc.get("lastAttemptAt") or 0)
@@ -185,10 +196,11 @@ class Database:
                 (user_id, uuid),
             ).fetchone()
             rev = (int(row["rev"]) if row else 0) + 1
+            prev_snapshot = json.loads(row["doc"])["snapshot"] if row else None
             # A strictly newer stored snapshot is kept (a stale/empty snapshot can't
             # clobber a fresh one); equal fetchedAt (error/claim bookkeeping) still applies.
             keep_current = row is not None and int(row["snapshot_fetched_at"]) > incoming_fetched
-            snapshot = json.loads(row["doc"])["snapshot"] if keep_current else incoming_snapshot
+            snapshot = prev_snapshot if keep_current else incoming_snapshot
             fetched = int(row["snapshot_fetched_at"]) if keep_current else incoming_fetched
             attempt = max(int(row["last_attempt_at"]) if row else 0, incoming_attempt)
             merged = {
@@ -206,7 +218,7 @@ class Database:
                 (user_id, uuid, json.dumps(merged), rev, fetched, attempt, merged["updatedAt"]),
             )
             pool = self._bump_rev(c, user_id)
-        return pool, merged
+        return pool, merged, prev_snapshot
 
     def get_usage(self, user_id: str, uuid: str) -> Optional[dict]:
         with self._tx() as c:
@@ -217,7 +229,9 @@ class Database:
 
     # --- instances (presence) ---
 
-    def put_instance(self, user_id: str, instance_id: str, doc: dict) -> int:
+    def put_instance(
+        self, user_id: str, instance_id: str, doc: dict
+    ) -> tuple[int, str, Optional[dict]]:
         """Heartbeat is stamped with the server clock so presence is skew-immune.
 
         The pool revision is bumped only when the instance's *content* changed
@@ -225,6 +239,10 @@ class Database:
         timestamp without a bump — otherwise every window's 20s heartbeat would
         make every other window pull a full snapshot on its next rev-poll.
         Clients compensate for the missing bumps with a periodic full sync.
+
+        Returns (pool_rev, kind, prev_doc) with kind ∈ "created" | "updated" |
+        "keepalive" — prev_doc lets the route describe the transition (signed in /
+        out / switched) when logging.
         """
         beat = now_ms()
         new_content = {k: v for k, v in doc.items() if k != "heartbeatAt"}
@@ -234,10 +252,9 @@ class Database:
                 "SELECT doc FROM instances WHERE user_id = ? AND instance_id = ?",
                 (user_id, instance_id),
             ).fetchone()
+            prev_doc = json.loads(row["doc"]) if row else None
             old_content = (
-                {k: v for k, v in json.loads(row["doc"]).items() if k != "heartbeatAt"}
-                if row
-                else None
+                {k: v for k, v in prev_doc.items() if k != "heartbeatAt"} if prev_doc else None
             )
             c.execute(
                 "INSERT INTO instances(user_id, instance_id, doc, heartbeat_at) VALUES(?,?,?,?) "
@@ -249,9 +266,9 @@ class Database:
                 pool_row = c.execute(
                     "SELECT rev FROM pool_rev WHERE user_id = ?", (user_id,)
                 ).fetchone()
-                return int(pool_row["rev"]) if pool_row else 0
+                return (int(pool_row["rev"]) if pool_row else 0, "keepalive", prev_doc)
             pool = self._bump_rev(c, user_id)
-        return pool
+        return (pool, "created" if row is None else "updated", prev_doc)
 
     def delete_instance(self, user_id: str, instance_id: str) -> int:
         with self._tx() as c:
@@ -278,12 +295,21 @@ class Database:
 
     def acquire_lock(
         self, user_id: str, uuid: str, owner: str, ttl_ms: int
-    ) -> tuple[bool, int]:
-        """Atomic acquire / expired-steal / same-owner renew. Returns (acquired, expiresAt)."""
+    ) -> tuple[bool, int, Optional[str]]:
+        """Atomic acquire / expired-steal / same-owner renew.
+
+        Returns (acquired, expiresAt, stolen_from) — stolen_from is the previous
+        owner when an expired lock was taken over (worth logging: it means a
+        window died or stalled mid-operation).
+        """
         ttl_ms = max(1, min(ttl_ms or LOCK_DEFAULT_TTL_MS, LOCK_MAX_TTL_MS))
         now = now_ms()
         expires = now + ttl_ms
         with self._tx() as c:
+            prev = c.execute(
+                "SELECT owner, expires_at FROM locks WHERE user_id = ? AND uuid = ?",
+                (user_id, uuid),
+            ).fetchone()
             c.execute(
                 "INSERT INTO locks(user_id, uuid, owner, expires_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(user_id, uuid) DO UPDATE SET owner=excluded.owner, "
@@ -295,7 +321,13 @@ class Database:
                 "SELECT owner, expires_at FROM locks WHERE user_id = ? AND uuid = ?",
                 (user_id, uuid),
             ).fetchone()
-        return row["owner"] == owner, int(row["expires_at"])
+        acquired = row["owner"] == owner
+        stolen_from = (
+            prev["owner"]
+            if acquired and prev is not None and prev["owner"] != owner and int(prev["expires_at"]) < now
+            else None
+        )
+        return acquired, int(row["expires_at"]), stolen_from
 
     def release_lock(self, user_id: str, uuid: str, owner: str) -> None:
         """Only the owner's lock is released (a stolen lock is left alone)."""

@@ -6,6 +6,7 @@ Good enough for a single-process self-hosted service; not shared across
 workers (run with one worker, the default).
 """
 
+import logging
 import time
 from collections import deque
 
@@ -13,6 +14,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from .config import Settings
+
+log = logging.getLogger("claude_switcher_sync")
 
 
 class SlidingWindow:
@@ -38,6 +41,9 @@ class SlidingWindow:
 def make_middleware(settings: Settings):
     authed = SlidingWindow(settings.rate_auth_per_min)
     unauthed = SlidingWindow(settings.rate_unauth_per_min)
+    # A client stuck over the limit keeps hitting 429 — log it once a minute per
+    # key, not once per request.
+    last_logged: dict[str, float] = {}
 
     async def limiter(request: Request, call_next):
         path = request.url.path
@@ -52,6 +58,10 @@ def make_middleware(settings: Settings):
             key = request.client.host if request.client else "?"
             ok = unauthed.allow("ip:" + key)
         if not ok:
+            now = time.monotonic()
+            if now - last_logged.get(key, 0.0) > 60.0:
+                last_logged[key] = now
+                log.warning("rate limit exceeded for %s (%s)", key, path)
             return JSONResponse(
                 {"detail": "Rate limit exceeded"}, status_code=429, headers={"Retry-After": "30"}
             )

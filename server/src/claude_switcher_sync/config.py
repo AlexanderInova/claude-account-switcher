@@ -19,6 +19,10 @@ class Settings:
     # Uvicorn access log (one line per request) — off by default; the rev-poll
     # makes it pure noise. CAS_ACCESS_LOG=1 turns it back on.
     access_log: bool = False
+    # Application event log level. INFO = meaningful events (registrations, account
+    # writes, presence changes, lock steals, auth failures); DEBUG adds usage writes
+    # and normal lock cycles.
+    log_level: str = "INFO"
     # Encrypted credential blobs are ~1KB; anything near the cap is abuse.
     max_secret_bytes: int = 16 * 1024
 
@@ -34,4 +38,5 @@ def from_env() -> Settings:
             os.environ.get("CAS_RATE_UNAUTH_PER_MIN", Settings.rate_unauth_per_min)
         ),
         access_log=os.environ.get("CAS_ACCESS_LOG", "0") in ("1", "true", "yes"),
+        log_level=os.environ.get("CAS_LOG_LEVEL", Settings.log_level).upper(),
     )

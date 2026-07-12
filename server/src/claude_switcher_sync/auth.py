@@ -9,10 +9,13 @@ encryption key is a sibling derivation that never leaves the client).
 
 import hashlib
 import hmac
+import logging
 
 from fastapi import HTTPException, Request
 
 from .db import Database
+
+log = logging.getLogger("claude_switcher_sync")
 
 
 def verifier_from_bearer(bearer_hex: str) -> str:
@@ -36,6 +39,8 @@ def make_auth(db: Database):
         # doesn't reveal which of user/passphrase was wrong.
         expected = user["verifier_sha256"] if user else verifier + "x"
         if not hmac.compare_digest(verifier, expected):
+            ip = request.client.host if request.client else "?"
+            log.warning("401 for user '%s' from %s (wrong passphrase or unknown user)", user_id, ip)
             raise HTTPException(status_code=401, detail="Invalid credentials")
         return user_id
 

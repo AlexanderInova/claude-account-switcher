@@ -25,8 +25,10 @@
   - **Lean traffic**: each window costs ~16 requests/min (a 5s single-integer change poll,
     a 20s presence heartbeat, and locks only when an account is actually due) — dueness is
     pre-checked against the local cache before any lock, and pure keep-alive heartbeats
-    don't invalidate other windows' caches. The server's access log is off by default
-    (`CAS_ACCESS_LOG=1` re-enables it).
+    don't invalidate other windows' caches. Instead of a raw access log (off by default,
+    `CAS_ACCESS_LOG=1` re-enables it) the server logs **events**: registrations, account
+    changes, windows joining/leaving/switching, secret writes (ids only), stolen locks,
+    cooldowns, and auth/rate-limit failures (`CAS_LOG_LEVEL` to tune).
 
 ## 0.2.0
 
