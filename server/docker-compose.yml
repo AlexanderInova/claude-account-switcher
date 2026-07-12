@@ -2,8 +2,9 @@ services:
   sync:
     build: .
     # When consuming a published image instead of building locally, replace
-    # `build: .` with (see README "Publishing the image"):
-    # image: ghcr.io/YOURUSER/claude-switcher-sync:0.2.2
+    # `build: .` with (see README "Publishing the image" — multi-arch, so it
+    # works on x86 and ARM Macs alike):
+    # image: auexprod.azurecr.io/claude-account-switcher-sync:0.2.2
     ports:
       - "8787:8787"
     volumes:

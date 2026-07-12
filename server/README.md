@@ -72,6 +72,45 @@ and rate-limit hits. `CAS_LOG_LEVEL=DEBUG` shows the full lock/usage churn;
 
 ## Publishing the image
 
+### Azure Container Registry, multi-arch (amd64 + Apple-Silicon arm64)
+
+One image that runs natively on x86 servers *and* ARM Macs. `docker buildx` builds both
+platforms and pushes a combined manifest in one step (the classic `docker build`/`push`
+only produces the architecture you ran it on):
+
+```bash
+az acr login --name auexprod           # or: docker login auexprod.azurecr.io
+
+# one-time: a builder that can target multiple platforms
+docker buildx create --use --name multiarch
+
+cd server
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  -t auexprod.azurecr.io/claude-account-switcher-sync:0.2.2 \
+  -t auexprod.azurecr.io/claude-account-switcher-sync:latest \
+  --push .
+
+# verify both architectures landed
+docker buildx imagetools inspect auexprod.azurecr.io/claude-account-switcher-sync:0.2.2
+```
+
+Every machine — Intel/AMD or ARM Mac — then pulls the right variant automatically:
+
+```yaml
+services:
+  sync:
+    image: auexprod.azurecr.io/claude-account-switcher-sync:0.2.2
+    # (replaces `build: .`; the rest of docker-compose.yml stays the same)
+```
+
+Notes: keep the tag in sync with the `pyproject.toml` version; the base image
+(`python:3.12-slim`) and all dependencies ship arm64 wheels, so no Dockerfile changes are
+needed; pulling machines authenticate once with `az acr login --name auexprod` (or a
+registry token/service principal on headless boxes).
+
+### Other registries (Docker Hub / GHCR)
+
 ```bash
 cd server
 docker build -t claude-switcher-sync:0.2.2 .          # keep the tag = pyproject version
@@ -88,9 +127,7 @@ docker tag claude-switcher-sync:0.2.2 ghcr.io/YOURUSER/claude-switcher-sync:0.2.
 echo "$GITHUB_PAT" | docker login ghcr.io -u YOURUSER --password-stdin
 docker push ghcr.io/YOURUSER/claude-switcher-sync:0.2.2
 
-# Multi-arch (amd64 + arm64 — e.g. to run on a Pi/NAS), builds and pushes in one step:
-docker buildx build --platform linux/amd64,linux/arm64 \
-  -t ghcr.io/YOURUSER/claude-switcher-sync:0.2.2 --push .
+# Multi-arch works the same as the ACR flow above — just swap the -t target.
 ```
 
 Machines that consume the published image use `image:` instead of `build:` in
