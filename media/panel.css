@@ -206,3 +206,18 @@ button:disabled {
   font-size: 12px;
   line-height: 1.5;
 }
+
+.section-toggle {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  cursor: pointer;
+  user-select: none;
+  padding: 4px 0;
+  margin: 4px 0;
+}
+
+.section-toggle:hover {
+  opacity: 1;
+}

@@ -4,6 +4,21 @@
 
 Reworked for running many windows/devcontainers at once.
 
+- **Manual refresh now works for idle accounts.** Auto-polling never rotates an idle parked
+  token (each refresh spends a single-use refresh token), so once such a token expired, even ⟳
+  silently did nothing and the card froze. A manual ⟳ now mints a fresh token for an expired
+  parked credential and fetches live usage (a dead grant is dropped, like "Test parked
+  credentials" would). Cards that can't auto-update — idle everywhere with every parked token
+  expired — show a **"stale"** badge explaining that ⟳ will update them.
+- **Cards are ordered by usability.** This window's account first, then accounts in use in
+  other windows (free before limit-reached), then available accounts (session limit not
+  reached before reached, each sorted by soonest weekly reset), and finally manually paused,
+  suspended, and credential-less accounts — collapsed into a "Paused & unavailable" section
+  at the bottom (starts collapsed; the toggle is remembered).
+- **Switch and Delete always confirm.** The credential picker now appears even when an
+  account has a single parked credential, so a stray click on Switch (or Delete) can't
+  change accounts or remove a credential without an explicit confirmation.
+
 - **Choose which credential on Switch and Delete.** When an account has several parked
   credentials, switching now shows a picker listing each one with when it was parked, when it
   was last used to fetch usage, its expiry, and whether its token is actually reachable in the

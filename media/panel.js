@@ -136,6 +136,15 @@
         badge("token invalid", "danger-badge", acc.suspendedDetail || "Refresh token no longer valid. Click Retry.")
       );
     }
+    if (!acc.ephemeral && acc.autoStale) {
+      title.appendChild(
+        badge(
+          "stale",
+          "paused",
+          "Usage can't auto-update: the idle parked token has expired, and idle tokens aren't auto-refreshed (each refresh spends a single-use refresh token). Click ⟳ to mint a fresh token and update now."
+        )
+      );
+    }
     head.appendChild(title);
 
     const headBtns = document.createElement("div");
@@ -280,8 +289,30 @@
       return;
     }
     emptyEl.classList.add("hidden");
-    for (const acc of accounts) {
-      listEl.appendChild(card(acc, state.warnThreshold || 80));
+    const warn = state.warnThreshold || 80;
+    for (const acc of accounts.filter((a) => !a.bottomGroup)) {
+      listEl.appendChild(card(acc, warn));
+    }
+    // Paused/suspended/failed accounts live in a collapsible bottom section.
+    // The list arrives pre-sorted, so these are always the trailing cards.
+    const bottom = accounts.filter((a) => a.bottomGroup);
+    if (bottom.length) {
+      // Default collapsed; the choice survives re-renders and reloads via webview state.
+      const collapsed = (vscode.getState() || {}).bottomExpanded !== true;
+      const header = document.createElement("div");
+      header.className = "section-toggle";
+      header.textContent = `${collapsed ? "▸" : "▾"} Paused & unavailable (${bottom.length})`;
+      header.title = "Manually paused, suspended, or no usable credential";
+      header.addEventListener("click", () => {
+        vscode.setState(Object.assign({}, vscode.getState(), { bottomExpanded: collapsed }));
+        render();
+      });
+      const box = document.createElement("div");
+      if (collapsed) box.classList.add("hidden");
+      for (const acc of bottom) {
+        box.appendChild(card(acc, warn));
+      }
+      listEl.append(header, box);
     }
   }
 

@@ -156,6 +156,13 @@ export interface AccountView {
   /** workspace names of other live instances where this account is deployed */
   inUseByOthers: string[];
   /**
+   * Usage can't auto-update: not deployed anywhere and every usable parked token has
+   * expired (idle spares are never auto-refreshed). A manual ⟳ mints a fresh token.
+   */
+  autoStale?: boolean;
+  /** Belongs in the collapsed bottom section (paused, suspended, or no usable credential). */
+  bottomGroup?: boolean;
+  /**
    * A display-only card for a local login not backed by a stored account (identity
    * unknown, or no shared store). Usage shows, but switch/rename/remove/pause don't.
    */

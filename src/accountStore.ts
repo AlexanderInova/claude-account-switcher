@@ -165,20 +165,25 @@ export class AccountStore {
     if (!this.store) {
       return this.localOnlyViews();
     }
+    const now = Date.now();
     const others = this.instances.filter((i) => i.instanceId !== this.instanceId);
-    const views = [...this.accounts.values()].map((f) => this.toView(f, others));
+    const views = [...this.accounts.values()].map((f) => this.toView(f, others, now));
     // A local login we couldn't register (identity unknown) still shows its usage.
     if (!this.activeUuid && this.credentials.readCurrent()) {
       views.push(this.ephemeralView());
     }
-    // Active account first, then by explicit order.
-    views.sort((a, b) => Number(b.isActive) - Number(a.isActive) || a.order - b.order);
+    views.sort((a, b) => compareViews(a, b, now));
     return views;
   }
 
-  private toView(f: AccountFile, others: InstanceInfo[]): AccountView {
+  private toView(f: AccountFile, others: InstanceInfo[], now: number): AccountView {
     const usable = f.credentials.filter((c) => !c.invalid);
     const invalid = f.credentials.filter((c) => c.invalid);
+    const isActive = this.activeUuid === f.account.uuid;
+    const inUseByOthers = others
+      .filter((i) => i.activeAccountUuid === f.account.uuid)
+      .map((i) => i.workspaceName);
+    const deployedSomewhere = isActive || inUseByOthers.length > 0;
     return {
       uuid: f.account.uuid,
       email: f.account.email,
@@ -190,10 +195,20 @@ export class AccountStore {
       parkedCount: usable.length,
       invalidCount: invalid.length,
       lastUsage: this.usage.get(f.account.uuid)?.snapshot,
-      isActive: this.activeUuid === f.account.uuid,
-      inUseByOthers: others
-        .filter((i) => i.activeAccountUuid === f.account.uuid)
-        .map((i) => i.workspaceName),
+      isActive,
+      inUseByOthers,
+      // Idle everywhere and every usable token has expired: auto-polling can't update
+      // this account (idle spares are never rotated) — only a manual ⟳ will.
+      autoStale:
+        !deployedSomewhere &&
+        usable.length > 0 &&
+        usable.every((c) => c.expiresAt - 60_000 <= now),
+      // Paused/suspended/failed accounts collapse to the bottom (unless active here).
+      bottomGroup:
+        !isActive &&
+        (!f.account.updatesEnabled ||
+          !!f.account.suspended ||
+          (!deployedSomewhere && usable.length === 0)),
     };
   }
 
@@ -221,4 +236,52 @@ export class AccountStore {
       ephemeral: true,
     };
   }
+}
+
+// --- panel ordering ---
+
+/**
+ * Sort rank for the panel (lower = higher up):
+ *   0 active in this window (always first, even if paused)
+ *   1 active in another window, limit not reached
+ *   2 active in another window, limit reached (capped)
+ *   3 inactive, session limit not reached
+ *   4 inactive, session limit reached
+ *   5 paused / suspended / failed (the collapsible bottom section)
+ */
+export function viewRank(v: AccountView, now: number): number {
+  if (v.isActive) {
+    return 0;
+  }
+  if (v.bottomGroup) {
+    return 5;
+  }
+  if (v.inUseByOthers.length > 0) {
+    return (v.lastUsage?.cappedUntil ?? 0) > now ? 2 : 1;
+  }
+  const sessionReached = v.lastUsage?.sessionPercent != null && v.lastUsage.sessionPercent >= 100;
+  return sessionReached ? 4 : 3;
+}
+
+/** Earliest weekly reset (epoch ms) among the usage windows; MAX_SAFE_INTEGER when unknown. */
+export function nextWeeklyReset(v: AccountView): number {
+  let min = Number.MAX_SAFE_INTEGER;
+  for (const w of v.lastUsage?.windows ?? []) {
+    if (w.kind.startsWith("weekly") && w.resetsAt) {
+      const t = Date.parse(w.resetsAt);
+      if (!isNaN(t) && t < min) {
+        min = t;
+      }
+    }
+  }
+  return min;
+}
+
+/** Tier rank, then soonest weekly reset, then the explicit account order. */
+export function compareViews(a: AccountView, b: AccountView, now: number): number {
+  return (
+    viewRank(a, now) - viewRank(b, now) ||
+    nextWeeklyReset(a) - nextWeeklyReset(b) ||
+    a.order - b.order
+  );
 }

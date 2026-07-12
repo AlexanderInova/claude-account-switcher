@@ -257,10 +257,10 @@ export function activate(context: vscode.ExtensionContext): void {
           }
           res = await switchService.deleteLocalCredential(targetId);
         } else {
-          // Which parked credential(s)? Multi-select when there's more than one.
+          // Which parked credential(s)? Always shown — it doubles as the confirmation.
           const parkedRefs = store?.readAccount(targetId)?.credentials ?? [];
           let ids: string[] | undefined; // undefined => all parked
-          if (parkedRefs.length > 1) {
+          if (parkedRefs.length >= 1) {
             const chosen = await pickCredentialsToDelete(store!, vault, targetId, label);
             if (!chosen) {
               return;
@@ -282,10 +282,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
 
-      // Not active here. With several parked credentials, let the user delete a subset;
-      // deleting all (or ≤1) removes the whole profile.
+      // Not active here. The multi-select always shows (it doubles as the confirmation);
+      // deleting a subset keeps the profile, ticking all removes the whole profile.
       const parkedRefs = store?.readAccount(targetId)?.credentials ?? [];
-      if (parkedRefs.length > 1) {
+      if (parkedRefs.length >= 1) {
         const chosen = await pickCredentialsToDelete(store!, vault, targetId, label);
         if (!chosen) {
           return;
@@ -596,9 +596,10 @@ async function credItems(vault: SecretVault, refs: CredentialRef[]): Promise<Cre
 }
 
 /**
- * Chooses which parked credential to deploy for an account. Returns the chosen id,
- * `undefined` to let the service use its default pick (0 or 1 candidate — no prompt),
- * or `null` if the user cancelled the chooser.
+ * Chooses which parked credential to deploy for an account. Always prompts (even for a
+ * single credential — the picker doubles as the switch confirmation, guarding against
+ * accidental clicks). Returns the chosen id, `undefined` to let the service use its
+ * default pick (no candidates), or `null` if the user cancelled the chooser.
  */
 async function pickCredentialToDeploy(
   store: SharedStore,
@@ -611,12 +612,17 @@ async function pickCredentialToDeploy(
     return undefined;
   }
   const usable = usableCredentials(file, Date.now());
-  if (usable.length <= 1) {
-    return usable[0]?.id;
+  if (usable.length === 0) {
+    return undefined;
   }
+  const single = usable.length === 1;
   const picked = await vscode.window.showQuickPick(await credItems(vault, usable), {
-    title: `Switch to "${label}" — choose a credential`,
-    placeHolder: "Select which parked credential to use",
+    title: single
+      ? `Switch to "${label}" — confirm credential`
+      : `Switch to "${label}" — choose a credential`,
+    placeHolder: single
+      ? "Press Enter to switch, Esc to cancel"
+      : "Select which parked credential to use",
     matchOnDescription: true,
   });
   return picked ? picked.id : null;

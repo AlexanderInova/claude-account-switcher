@@ -444,25 +444,57 @@ export class UsagePoller {
       await this.applyResult(uuid, result, now, null);
       return;
     }
-    await this.runLease(uuid, plan.credId, plan.unverified, now);
+    await this.runLease(uuid, plan.credId, plan.unverified, now, force);
   }
 
-  private async runLease(uuid: string, credId: string, unverified: boolean, now: number): Promise<void> {
+  private async runLease(
+    uuid: string,
+    credId: string,
+    unverified: boolean,
+    now: number,
+    force: boolean
+  ): Promise<void> {
     if (!this.store) {
       return;
     }
     // Trust the stored blob (don't gate on a possibly-stale ref-hash).
-    const creds = await this.vault.get(credId);
+    let creds = await this.vault.get(credId);
     if (!creds) {
       // Orphaned ref — leave it for the "Test parked credentials" cleanup; just release.
       await this.clearLease(uuid, credId);
       return;
     }
     if (TokenRefresher.isExpired(creds)) {
-      // Do NOT refresh/rotate an idle spare merely to poll usage — that churns the
-      // ref/blob pair and spends a single-use refresh token. Skip this cycle.
-      await this.clearLease(uuid, credId);
-      return;
+      if (!force) {
+        // Do NOT refresh/rotate an idle spare merely to poll usage — that churns the
+        // ref/blob pair and spends a single-use refresh token. Skip this cycle.
+        await this.clearLease(uuid, credId);
+        return;
+      }
+      // Belt-and-braces (same guard as the validator): never rotate the grant that is
+      // live in this window, even if a drifted ref still points at it.
+      const local = this.credentials.readCurrent();
+      if (local && refreshTokenHash(local) === refreshTokenHash(creds)) {
+        await this.clearLease(uuid, credId);
+        return;
+      }
+      // Manual refresh: the user explicitly asked for fresh numbers, so mint a new
+      // token (same flow as "Test parked credentials"), persisting token-first.
+      const r = await this.refresher.refresh(creds);
+      const verdict = verdictFromRefresh(r);
+      if (verdict !== "valid" || !r.creds) {
+        if (verdict === "invalid") {
+          // Dead grant — the ref can never work again; drop it like the validator would.
+          await this.dropParkedCredential(uuid, credId);
+        } else {
+          await this.clearLease(uuid, credId);
+        }
+        await this.writeError(uuid, { error: r.error ?? "Token refresh failed", status: r.status }, now);
+        return;
+      }
+      await this.vault.put(credId, r.creds); // token before ref-hash (blob is authoritative)
+      await this.updateRefTokens(uuid, credId, r.creds);
+      creds = r.creds;
     }
     const result = await fetchUsage(creds);
     await this.applyResult(uuid, result, now, credId, unverified);

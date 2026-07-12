@@ -26,6 +26,10 @@ interface ViewAccount {
   fetchedAt?: number;
   cappedUntil?: number;
   ephemeral?: boolean;
+  /** usage frozen: every idle parked token expired; manual ⟳ mints a fresh one */
+  autoStale?: boolean;
+  /** render inside the collapsed "Paused & unavailable" bottom section */
+  bottomGroup?: boolean;
 }
 
 /** Activity bar panel: list of accounts with usage limits and actions. */
@@ -105,6 +109,8 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
       fetchedAt: v.lastUsage?.fetchedAt,
       cappedUntil: v.lastUsage?.cappedUntil,
       ephemeral: v.ephemeral,
+      autoStale: v.autoStale,
+      bottomGroup: v.bottomGroup,
     }));
 
     const warnThreshold = vscode.workspace
