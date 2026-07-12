@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.2
+
+- **Sync server (multi-machine).** New opt-in `claudeSwitcher.sync.mode: "server"` coordinates
+  through a small self-hosted service (see `server/` — FastAPI + SQLite, runs bare or via
+  `docker compose up`, data in one volume-backed file) so **multiple machines** share one
+  account pool. Multi-user: every user id is an isolated pool.
+  - **End-to-end encrypted**: parked tokens are AES-256-GCM-encrypted on your machine with a
+    key derived from your passphrase (scrypt → HKDF); the server only ever stores ciphertext.
+    A sibling derivation is the login — a wrong passphrase is a plain 401, so nobody can
+    accidentally read or write someone else's pool.
+  - **Unlock once per machine**: `Claude: Unlock sync server…` (registers on first use; only
+    derived keys are stored, never the passphrase). `Claude: Lock sync server` forgets them.
+    The panel shows a clickable "🔒 server sync locked" hint until then.
+  - **Graceful unavailability**: if the server is unreachable the panel shows
+    "⚠ sync server unreachable — retrying…" with the age of the shown data, windows keep the
+    last known state, polling skips cycles instead of erroring, and the connection recovers
+    automatically (checked every ~5s). Rotated refresh tokens are journaled locally before
+    any upload, so even a crash or outage mid-rotation can't lose a single-use token.
+  - **Folder import**: in server mode the extension detects an existing shared folder with
+    parked accounts and offers to upload it (`Claude: Migrate folder store to sync server…`
+    does it on demand; re-running is safe). A successful upload stamps the folder with a
+    `.migrated` marker; folder mode refuses a marked folder so the pool can't fork.
+  - **Lean traffic**: each window costs ~16 requests/min (a 5s single-integer change poll,
+    a 20s presence heartbeat, and locks only when an account is actually due) — dueness is
+    pre-checked against the local cache before any lock, and pure keep-alive heartbeats
+    don't invalidate other windows' caches. The server's access log is off by default
+    (`CAS_ACCESS_LOG=1` re-enables it).
+
 ## 0.2.0
 
 Reworked for running many windows/devcontainers at once.

@@ -32,6 +32,20 @@ interface ViewAccount {
   bottomGroup?: boolean;
 }
 
+/** Sync-backend state for the panel's status bar (folder or server mode). */
+export interface SyncUiStatus {
+  mode: "folder" | "server";
+  /** Server mode without usable keys — unlock required. */
+  locked: boolean;
+  lockDetail?: string;
+  /** Server mode: the server is currently not answering (cache is being served). */
+  unreachable: boolean;
+  /** Server mode: how old the last successful sync is. */
+  lastSyncAgoMs?: number;
+  /** Folder mode: the folder carries a .migrated marker pointing at this server. */
+  migratedTo?: string;
+}
+
 /** Activity bar panel: list of accounts with usage limits and actions. */
 export class AccountsViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewType = "claudeSwitcher.accountsView";
@@ -39,7 +53,8 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly extensionUri: vscode.Uri,
-    private readonly store: AccountStore
+    private readonly store: AccountStore,
+    private readonly getSyncStatus?: () => SyncUiStatus
   ) {}
 
   resolveWebviewView(webviewView: vscode.WebviewView): void {
@@ -80,6 +95,9 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
         case "undo":
           void vscode.commands.executeCommand("claudeSwitcher.undoSwitch");
           break;
+        case "unlock":
+          void vscode.commands.executeCommand("claudeSwitcher.serverUnlock");
+          break;
       }
     });
 
@@ -117,6 +135,7 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
       .getConfiguration("claudeSwitcher")
       .get<number>("warnThresholdPercent", 80);
 
+    const status = this.getSyncStatus?.();
     void this.view.webview.postMessage({
       type: "state",
       accounts,
@@ -125,6 +144,12 @@ export class AccountsViewProvider implements vscode.WebviewViewProvider {
         enabled: this.store.hasStore(),
         folder: this.store.storeDir(),
         windows: this.store.liveInstances().length,
+        mode: status?.mode ?? "folder",
+        locked: status?.locked ?? false,
+        lockDetail: status?.lockDetail,
+        unreachable: status?.unreachable ?? false,
+        lastSyncAgoMs: status?.lastSyncAgoMs,
+        migratedTo: status?.migratedTo,
       },
     });
   }

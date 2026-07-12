@@ -100,6 +100,18 @@
       {
         "command": "claudeSwitcher.debugSecretSharing",
         "title": "Claude: Debug — SecretStorage sharing test"
+      },
+      {
+        "command": "claudeSwitcher.serverUnlock",
+        "title": "Claude: Unlock sync server…"
+      },
+      {
+        "command": "claudeSwitcher.serverLock",
+        "title": "Claude: Lock sync server (forget keys)"
+      },
+      {
+        "command": "claudeSwitcher.migrateToServer",
+        "title": "Claude: Migrate folder store to sync server…"
       }
     ],
     "menus": {
@@ -135,6 +147,15 @@
         },
         {
           "command": "claudeSwitcher.debugSecretSharing"
+        },
+        {
+          "command": "claudeSwitcher.serverUnlock"
+        },
+        {
+          "command": "claudeSwitcher.serverLock"
+        },
+        {
+          "command": "claudeSwitcher.migrateToServer"
         }
       ]
     },
@@ -166,6 +187,22 @@
           "type": "string",
           "default": "",
           "markdownDescription": "Absolute path to the shared coordination folder. Empty = auto-detect a `.claude-account-switcher` directory in the workspace, otherwise fall back to `account-switcher/` next to the credentials file (e.g. `~/.claude/account-switcher/`). Token material is never written here — only metadata, ids, and usage. Reload the window after changing this."
+        },
+        "claudeSwitcher.sync.mode": {
+          "type": "string",
+          "enum": ["folder", "server"],
+          "default": "folder",
+          "markdownDescription": "How windows coordinate: `folder` shares a directory on this machine; `server` talks to a self-hosted sync server (see the extension's `server/` directory) so **multiple machines** share one pool, with tokens end-to-end encrypted. Server mode needs `#claudeSwitcher.sync.server.url#`, `#claudeSwitcher.sync.server.user#`, and a one-time **Claude: Unlock sync server** per machine. Reload the window after changing this."
+        },
+        "claudeSwitcher.sync.server.url": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Base URL of the sync server (e.g. `http://192.168.1.10:8787` or `https://sync.example.com`). Reload the window after changing this."
+        },
+        "claudeSwitcher.sync.server.user": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Your user id on the sync server (e.g. your email). Together with the passphrase (entered via **Claude: Unlock sync server**, never stored) it selects and protects your pool. Reload the window after changing this."
         },
         "claudeSwitcher.credentialsPath": {
           "type": "string",

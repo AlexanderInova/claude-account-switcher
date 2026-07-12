@@ -267,11 +267,42 @@
   function renderSync() {
     if (!syncEl) return;
     const s = state.sync || {};
+    syncEl.onclick = null;
+    syncEl.classList.remove("clickable");
+
+    if (s.mode === "server" && s.locked) {
+      syncEl.textContent = "🔒 server sync locked — click to unlock";
+      syncEl.title = s.lockDetail || "Run 'Claude: Unlock sync server' and enter your passphrase.";
+      syncEl.classList.add("warn-text", "clickable");
+      syncEl.onclick = () => vscode.postMessage({ type: "unlock" });
+      return;
+    }
+    if (s.mode === "server" && s.enabled) {
+      const n = s.windows || 1;
+      if (s.unreachable) {
+        const ago = typeof s.lastSyncAgoMs === "number" && s.lastSyncAgoMs < 8.64e7
+          ? ` · data from ${Math.max(1, Math.round(s.lastSyncAgoMs / 1000))}s ago`
+          : "";
+        syncEl.textContent = `⚠ sync server unreachable — retrying…${ago}`;
+        syncEl.title = (s.folder ? "Server: " + s.folder + ". " : "") +
+          "Showing the last known state; the connection is retried every few seconds and recovers automatically.";
+        syncEl.classList.add("warn-text");
+      } else {
+        syncEl.textContent = `⇄ server sync · ${n} window${n === 1 ? "" : "s"}`;
+        syncEl.title = s.folder ? "Server: " + s.folder : "";
+        syncEl.classList.remove("warn-text");
+      }
+      return;
+    }
     if (s.enabled) {
       const n = s.windows || 1;
       syncEl.textContent = `⇄ synced · ${n} window${n === 1 ? "" : "s"}`;
       syncEl.title = s.folder ? "Store: " + s.folder : "";
       syncEl.classList.remove("warn-text");
+    } else if (s.migratedTo) {
+      syncEl.textContent = "⚠ folder retired — migrated to the sync server";
+      syncEl.title = `This folder's contents were uploaded to ${s.migratedTo}. Set claudeSwitcher.sync.mode to "server" (or delete the folder's .migrated file).`;
+      syncEl.classList.add("warn-text");
     } else {
       syncEl.textContent = "⚠ not synced — account switching disabled";
       syncEl.title =

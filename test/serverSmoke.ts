@@ -218,6 +218,13 @@ async function main(): Promise<void> {
   await store.writeInstance({ instanceId: "i-1", hostname: "h", pid: 1, workspaceName: "w", startedAt: 1, heartbeatAt: 1 });
   await sleep(400);
   check("instance visible to the other window", store2.listLiveInstances(Date.now()).some((i) => i.instanceId === "i-1"));
+  // A pure keep-alive heartbeat must not bump the pool revision (no snapshot churn).
+  const sigBeforeBeat = store.revSignature();
+  await store.writeInstance({ instanceId: "i-1", hostname: "h", pid: 1, workspaceName: "w", startedAt: 1, heartbeatAt: 2 });
+  check("keep-alive heartbeat does not bump the revision", store.revSignature() === sigBeforeBeat);
+  // A content change (different deployed account) does.
+  await store.writeInstance({ instanceId: "i-1", hostname: "h", pid: 1, workspaceName: "w", startedAt: 1, heartbeatAt: 3, activeAccountUuid: "u1" });
+  check("heartbeat with changed content bumps the revision", store.revSignature() !== sigBeforeBeat);
   await store.setCooldownUntil(4_242);
   check("cooldown write-through", store.cooldownUntil() === 4_242);
   await store.deleteAccount("u4");

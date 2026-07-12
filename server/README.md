@@ -55,8 +55,9 @@ Interactive API docs at `http://localhost:8787/docs`.
 | `CAS_DB_PATH` | `/data/switcher.db` | SQLite file (backup = copy this one file) |
 | `CAS_HOST` / `CAS_PORT` | `0.0.0.0` / `8787` | Bind address |
 | `CAS_REGISTRATION_TOKEN` | *(empty = open)* | Require this token to register new users |
-| `CAS_RATE_AUTH_PER_MIN` | `240` | Per-user request limit |
+| `CAS_RATE_AUTH_PER_MIN` | `600` | Per-user request limit (~16 req/min per open window) |
 | `CAS_RATE_UNAUTH_PER_MIN` | `10` | Per-IP limit for register/salt lookups |
+| `CAS_ACCESS_LOG` | `0` | Set `1` to log every request (noisy: clients poll every 5s) |
 
 ## Using it from VS Code
 

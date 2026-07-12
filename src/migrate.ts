@@ -3,7 +3,7 @@ import * as vscode from "vscode";
 import { CredentialsManager } from "./credentials";
 import { IdentityManager } from "./identity";
 import { SecretVault, refreshTokenHash } from "./secretVault";
-import { SharedStore } from "./store";
+import { SyncStore } from "./syncStore";
 import { AccountFile, OAuthAccountInfo, OAuthCreds, UsageSnapshot } from "./types";
 
 const OLD_PROFILES_KEY = "claudeSwitcher.profiles";
@@ -57,7 +57,7 @@ function accountFile(
  */
 export async function migrateIfNeeded(
   context: vscode.ExtensionContext,
-  store: SharedStore,
+  store: SyncStore,
   vault: SecretVault,
   credentials: CredentialsManager,
   identity: IdentityManager
@@ -96,7 +96,7 @@ export async function migrateIfNeeded(
 
     if (isLocalLive) {
       const uuid = localIdent?.accountUuid ?? p.id;
-      await store.withAccountLock(uuid, () => {
+      await store.withAccountLock(uuid, async () => {
         const file =
           store.readAccount(uuid) ??
           accountFile(uuid, p.label, localIdent, creds!.subscriptionType, order++, false);
@@ -106,10 +106,10 @@ export async function migrateIfNeeded(
         if (creds!.subscriptionType) {
           file.account.subscriptionType = creds!.subscriptionType;
         }
-        store.writeAccount(file);
+        await store.writeAccount(file);
         // Seed usage only if the shared store has none yet — never clobber fresher data.
         if (p.lastUsage && !store.readUsage(uuid)) {
-          store.writeUsage(uuid, {
+          await store.writeUsage(uuid, {
             rev: 0,
             updatedAt: 0,
             lastAttemptAt: 0,
@@ -134,7 +134,7 @@ export async function migrateIfNeeded(
       }
       const credId = crypto.randomUUID();
       await vault.put(credId, creds);
-      await store.withAccountLock(uuid, () => {
+      await store.withAccountLock(uuid, async () => {
         const file =
           store.readAccount(uuid) ??
           accountFile(uuid, p.label, undefined, creds!.subscriptionType, order++, true);
@@ -147,9 +147,9 @@ export async function migrateIfNeeded(
             unverified: true,
           });
         }
-        store.writeAccount(file);
+        await store.writeAccount(file);
         if (p.lastUsage && !store.readUsage(uuid)) {
-          store.writeUsage(uuid, {
+          await store.writeUsage(uuid, {
             rev: 0,
             updatedAt: 0,
             lastAttemptAt: 0,

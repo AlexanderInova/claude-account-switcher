@@ -2,8 +2,9 @@ import * as os from "os";
 import { AccountStore } from "./accountStore";
 import { CredentialsManager } from "./credentials";
 import { TokenRefresher } from "./oauth";
-import { SecretVault, refreshTokenHash } from "./secretVault";
-import { SharedStore } from "./store";
+import { TokenVault, refreshTokenHash } from "./secretVault";
+import { RotationRecovery } from "./serverSync/rotationRecovery";
+import { SyncStore } from "./syncStore";
 import { AccountFile, CredentialRef, OAuthCreds, UsageFile, UsageSnapshot, UsageWindow } from "./types";
 
 const USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -247,8 +248,10 @@ export class UsagePoller {
   private running = false;
 
   constructor(
-    private readonly store: SharedStore | null,
-    private readonly vault: SecretVault,
+    private readonly store: SyncStore | null,
+    private readonly vault: TokenVault,
+    /** Write-ahead journal for rotated refresh tokens (no-op in folder mode). */
+    private readonly recovery: RotationRecovery,
     private readonly refresher: TokenRefresher,
     private readonly credentials: CredentialsManager,
     private readonly accountStore: AccountStore,
@@ -300,7 +303,13 @@ export class UsagePoller {
         return;
       }
       const now = Date.now();
-      this.heartbeat(now);
+      await this.heartbeat(now);
+
+      // Rotated tokens that could not be pushed to the sync server yet (outage or
+      // crash) are re-pushed here — before anything else might rotate again.
+      if (this.recovery.pendingIds().length > 0) {
+        await this.recovery.retryPending(this.vault);
+      }
 
       // Auto-register the account logged in locally (if its identity is known and it
       // isn't stored yet) so its usage is polled and it shows up everywhere.
@@ -320,7 +329,13 @@ export class UsagePoller {
       }
 
       for (const uuid of this.store.listAccountUuids()) {
-        await this.pollAccount(uuid, force);
+        try {
+          await this.pollAccount(uuid, force);
+        } catch (e) {
+          // An unreachable sync backend mid-poll is a skipped cycle, not a crash;
+          // the next tick (and the store's own reconnect polling) recovers.
+          console.error(`claudeSwitcher: poll failed for ${uuid}`, e);
+        }
       }
 
       // Identity-unknown fallback: a local login we couldn't name gets no account
@@ -345,27 +360,27 @@ export class UsagePoller {
       this.onUpdate();
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const f = this.store!.readAccount(uuid);
       if (f?.account.suspended) {
         f.account.suspended = undefined;
-        this.store!.writeAccount(f);
+        await this.store!.writeAccount(f);
       }
       const u = this.store!.readUsage(uuid);
       if (u?.snapshot?.retryAfter) {
         u.snapshot.retryAfter = undefined;
-        this.store!.writeUsage(uuid, u);
+        await this.store!.writeUsage(uuid, u);
       }
     });
     await this.pollAccount(uuid, true);
     this.onUpdate();
   }
 
-  private heartbeat(now: number): void {
+  private async heartbeat(now: number): Promise<void> {
     if (!this.store) {
       return;
     }
-    this.store.writeInstance({
+    await this.store.writeInstance({
       instanceId: this.instanceId,
       hostname: os.hostname(),
       pid: process.pid,
@@ -377,7 +392,7 @@ export class UsagePoller {
   }
 
   disposeInstance(): void {
-    this.store?.removeInstance(this.instanceId);
+    void this.store?.removeInstance(this.instanceId);
   }
 
   // --- per-account polling ---
@@ -398,12 +413,26 @@ export class UsagePoller {
       return;
     }
 
+    // Cheap pre-check against local state before taking the lock. In server mode a
+    // lock is two HTTP round trips, so paying them every tick for every account just
+    // to learn "not due yet" is the dominant traffic source. The claim below re-checks
+    // everything under the lock, so this is purely an optimization, never a decision.
+    if (!force) {
+      const peek = this.store.readAccount(uuid);
+      if (!peek || !peek.account.updatesEnabled || peek.account.suspended) {
+        return;
+      }
+      if (!isDue(now, this.intervalMs(), this.store.readUsage(uuid))) {
+        return;
+      }
+    }
+
     const localCreds = activeHere ? this.credentials.readCurrent() : null;
     const localUsable = localCreds !== null && !TokenRefresher.isExpired(localCreds);
 
     // Claim under the account lock: recheck dueness, stamp lastAttemptAt, and if we
     // will use a parked credential, mark the lease — all atomically.
-    const plan = await this.store.withAccountLock(uuid, (): PollPlan => {
+    const plan = await this.store.withAccountLock(uuid, async (): Promise<PollPlan> => {
       const file = this.store!.readAccount(uuid);
       if (!file) {
         return { kind: "skip" };
@@ -419,14 +448,14 @@ export class UsagePoller {
       // "waiting for the token" account re-checks cheaply next tick instead of being
       // locked out for a whole interval.
       if (localUsable) {
-        this.store!.writeUsage(uuid, { ...(usage ?? emptyUsage()), lastAttemptAt: now });
+        await this.store!.writeUsage(uuid, { ...(usage ?? emptyUsage()), lastAttemptAt: now });
         return { kind: "local" };
       }
       const ref = pickFreeCredential(file, now);
       if (ref) {
         ref.lease = { instanceId: this.instanceId, at: now };
-        this.store!.writeAccount(file);
-        this.store!.writeUsage(uuid, { ...(usage ?? emptyUsage()), lastAttemptAt: now });
+        await this.store!.writeAccount(file);
+        await this.store!.writeUsage(uuid, { ...(usage ?? emptyUsage()), lastAttemptAt: now });
         return { kind: "lease", credId: ref.id, unverified: !!ref.unverified };
       }
       return activeHere ? { kind: "waiting" } : { kind: "none" };
@@ -492,8 +521,12 @@ export class UsagePoller {
         await this.writeError(uuid, { error: r.error ?? "Token refresh failed", status: r.status }, now);
         return;
       }
+      // The old refresh token is dead the moment refresh() succeeded. Journal the new
+      // creds locally BEFORE any (possibly remote) write, so an outage can't lose them.
+      await this.recovery.journal(credId, r.creds);
       await this.vault.put(credId, r.creds); // token before ref-hash (blob is authoritative)
       await this.updateRefTokens(uuid, credId, r.creds);
+      await this.recovery.clear(credId);
       creds = r.creds;
     }
     const result = await fetchUsage(creds);
@@ -513,13 +546,13 @@ export class UsagePoller {
       return;
     }
     let hitCooldown = false;
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const file = this.store!.readAccount(uuid);
       const usage = this.store!.readUsage(uuid) ?? emptyUsage();
       const prev = usage.snapshot;
 
       if (result.snapshot) {
-        this.store!.writeUsage(uuid, {
+        await this.store!.writeUsage(uuid, {
           ...usage,
           snapshot: result.snapshot,
           lastAttemptAt: now,
@@ -538,13 +571,13 @@ export class UsagePoller {
               delete ref.lease;
             }
           }
-          this.store!.writeAccount(file);
+          await this.store!.writeAccount(file);
         }
         return;
       }
 
       // Error: preserve previous data, annotate.
-      this.store!.writeUsage(uuid, {
+      await this.store!.writeUsage(uuid, {
         ...usage,
         snapshot: errorSnapshot(prev, result, now),
         lastAttemptAt: now,
@@ -562,11 +595,11 @@ export class UsagePoller {
         if (result.status === 429 && this.getAutoSuspend()) {
           file.account.suspended = { at: now, reason: "rate-limit" };
         }
-        this.store!.writeAccount(file);
+        await this.store!.writeAccount(file);
       }
     });
     if (hitCooldown) {
-      this.store.setCooldownUntil(result.retryAfter ?? now + BACKOFF_429_MS);
+      await this.store.setCooldownUntil(result.retryAfter ?? now + BACKOFF_429_MS);
     }
   }
 
@@ -578,9 +611,9 @@ export class UsagePoller {
     if (!this.store) {
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const usage = this.store!.readUsage(uuid) ?? emptyUsage();
-      this.store!.writeUsage(uuid, {
+      await this.store!.writeUsage(uuid, {
         ...usage,
         snapshot: errorSnapshot(usage.snapshot, result, now),
         lastAttemptAt: now,
@@ -592,7 +625,7 @@ export class UsagePoller {
     if (!this.store) {
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const file = this.store!.readAccount(uuid);
       if (!file) {
         return;
@@ -602,7 +635,7 @@ export class UsagePoller {
         ref.expiresAt = creds.expiresAt;
         ref.refreshTokenHash = refreshTokenHash(creds);
       }
-      this.store!.writeAccount(file);
+      await this.store!.writeAccount(file);
     });
   }
 
@@ -610,7 +643,7 @@ export class UsagePoller {
     if (!this.store) {
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const file = this.store!.readAccount(uuid);
       if (!file) {
         return;
@@ -619,7 +652,7 @@ export class UsagePoller {
       if (ref) {
         delete ref.lease;
       }
-      this.store!.writeAccount(file);
+      await this.store!.writeAccount(file);
     });
   }
 
@@ -628,13 +661,13 @@ export class UsagePoller {
     if (!this.store) {
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const file = this.store!.readAccount(uuid);
       if (!file) {
         return;
       }
       file.credentials = file.credentials.filter((c) => c.id !== credId);
-      this.store!.writeAccount(file);
+      await this.store!.writeAccount(file);
     });
     await this.vault.remove(credId);
   }
@@ -669,7 +702,7 @@ export class UsagePoller {
           break;
         }
         const now = Date.now();
-        const claim = await this.store.withAccountLock(uuid, () => {
+        const claim = await this.store.withAccountLock(uuid, async () => {
           const file = this.store!.readAccount(uuid);
           const ref = file?.credentials.find((c) => c.id === credId);
           if (!file || !ref) {
@@ -682,7 +715,7 @@ export class UsagePoller {
             return undefined; // never probe the live grant
           }
           ref.lease = { instanceId: this.instanceId, at: now };
-          this.store!.writeAccount(file);
+          await this.store!.writeAccount(file);
           return true;
         });
         if (!claim) {
@@ -733,8 +766,12 @@ export class UsagePoller {
       const r = await this.refresher.refresh(creds);
       const verdict = verdictFromRefresh(r);
       if (verdict === "valid" && r.creds) {
+        // Journal-first: the rotation just consumed the single-use refresh token,
+        // so the fresh creds must survive even if the (remote) vault write fails.
+        await this.recovery.journal(credId, r.creds);
         await this.vault.put(credId, r.creds); // persist the rotated token
         await this.updateRefTokens(uuid, credId, r.creds);
+        await this.recovery.clear(credId);
       }
       return verdict;
     }

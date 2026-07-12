@@ -214,8 +214,16 @@ export class FakeSyncServer {
     if (m) {
       const id = decodeURIComponent(m[1]);
       if (method === "PUT") {
-        pool.instances.set(id, { ...(body as unknown as InstanceInfo), heartbeatAt: now });
-        pool.rev++;
+        // Mirrors the real server: a pure keep-alive (content unchanged apart from
+        // heartbeatAt) refreshes the timestamp without bumping the pool revision.
+        const strip = (d: InstanceInfo): Partial<InstanceInfo> => ({ ...d, heartbeatAt: 0 });
+        const old = pool.instances.get(id);
+        const incoming = body as unknown as InstanceInfo;
+        const changed = !old || JSON.stringify(strip(old)) !== JSON.stringify(strip(incoming));
+        pool.instances.set(id, { ...incoming, heartbeatAt: now });
+        if (changed) {
+          pool.rev++;
+        }
         return json(200, { poolRev: pool.rev });
       }
       if (method === "DELETE") {

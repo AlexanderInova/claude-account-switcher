@@ -165,7 +165,12 @@ def main() -> None:
     import uvicorn
 
     settings = from_env()
-    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
+    uvicorn.run(
+        create_app(settings),
+        host=settings.host,
+        port=settings.port,
+        access_log=settings.access_log,
+    )
 
 
 def app_factory() -> FastAPI:

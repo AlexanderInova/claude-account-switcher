@@ -218,16 +218,38 @@ class Database:
     # --- instances (presence) ---
 
     def put_instance(self, user_id: str, instance_id: str, doc: dict) -> int:
-        """Heartbeat is stamped with the server clock so presence is skew-immune."""
+        """Heartbeat is stamped with the server clock so presence is skew-immune.
+
+        The pool revision is bumped only when the instance's *content* changed
+        (new window, different active account, …). A pure keep-alive updates the
+        timestamp without a bump — otherwise every window's 20s heartbeat would
+        make every other window pull a full snapshot on its next rev-poll.
+        Clients compensate for the missing bumps with a periodic full sync.
+        """
         beat = now_ms()
+        new_content = {k: v for k, v in doc.items() if k != "heartbeatAt"}
         doc = {**doc, "heartbeatAt": beat}
         with self._tx() as c:
+            row = c.execute(
+                "SELECT doc FROM instances WHERE user_id = ? AND instance_id = ?",
+                (user_id, instance_id),
+            ).fetchone()
+            old_content = (
+                {k: v for k, v in json.loads(row["doc"]).items() if k != "heartbeatAt"}
+                if row
+                else None
+            )
             c.execute(
                 "INSERT INTO instances(user_id, instance_id, doc, heartbeat_at) VALUES(?,?,?,?) "
                 "ON CONFLICT(user_id, instance_id) DO UPDATE SET doc=excluded.doc, "
                 "heartbeat_at=excluded.heartbeat_at",
                 (user_id, instance_id, json.dumps(doc), beat),
             )
+            if old_content == new_content:
+                pool_row = c.execute(
+                    "SELECT rev FROM pool_rev WHERE user_id = ?", (user_id,)
+                ).fetchone()
+                return int(pool_row["rev"]) if pool_row else 0
             pool = self._bump_rev(c, user_id)
         return pool
 

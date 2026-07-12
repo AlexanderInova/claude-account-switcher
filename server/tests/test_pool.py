@@ -66,6 +66,20 @@ def test_instance_heartbeat_server_stamped_and_pruned(user, monkeypatch):
     assert snap2["instances"] == []
 
 
+def test_instance_keepalive_does_not_bump_rev(user):
+    info = {"instanceId": "i1", "hostname": "h", "pid": 1, "workspaceName": "w",
+            "startedAt": 1, "heartbeatAt": 1}
+    r1 = user.put("/v1/pool/instances/i1", json=info)
+    rev_after_create = r1.json()["poolRev"]
+    # Pure keep-alive: same content, only the heartbeat advances → no bump.
+    r2 = user.put("/v1/pool/instances/i1", json=info)
+    assert r2.json()["poolRev"] == rev_after_create
+    assert user.get("/v1/pool/rev").json()["rev"] == rev_after_create
+    # Content change (deployed account switched) → bump.
+    r3 = user.put("/v1/pool/instances/i1", json={**info, "activeAccountUuid": "u1"})
+    assert r3.json()["poolRev"] == rev_after_create + 1
+
+
 def test_instance_delete_204(user):
     user.put("/v1/pool/instances/i1", json={"instanceId": "i1", "hostname": "h", "pid": 1,
                                             "workspaceName": "w", "startedAt": 1,

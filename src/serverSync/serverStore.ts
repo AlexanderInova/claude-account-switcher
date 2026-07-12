@@ -3,6 +3,11 @@ import { StoreWatcher, SyncStore } from "../syncStore";
 import { RETRY_NONE, RETRY_STANDARD, SyncHttp } from "./http";
 
 const POLL_MS = 5_000;
+// Pure heartbeats don't bump the pool revision (that would make N windows pull
+// N×(N−1) snapshots per heartbeat round), so presence is refreshed by forcing a
+// full snapshot at least this often. Must stay well below the 90s instance
+// staleness window.
+const FULL_SYNC_MS = 60_000;
 const LOCK_TTL_MS = 30_000;
 const LOCK_RETRY_MS = 250;
 const LOCK_MAX_WAIT_MS = 2_000;
@@ -42,6 +47,7 @@ export class ServerStore implements SyncStore {
   private cooldownUntilMs = 0;
   private poolRev = -1;
   private lastSyncAt = 0;
+  private lastSnapshotAt = 0;
   private reachable = false;
   private needSnapshot = false;
   private readonly callbacks = new Set<() => void>();
@@ -69,7 +75,7 @@ export class ServerStore implements SyncStore {
     try {
       await this.refreshSnapshot();
     } catch {
-      this.reachable = false;
+      this.setReachable(false);
     }
     this.timer = setInterval(() => void this.pollOnce(), this.pollMs);
   }
@@ -89,18 +95,23 @@ export class ServerStore implements SyncStore {
       throw new Error(`snapshot HTTP ${res.status}`);
     }
     const snap = res.json as Snapshot;
-    // Server-stamped heartbeats + lock expiries use the server clock; rebase
-    // heartbeats into this machine's clock so listLiveInstances(now) stays correct.
-    const skew = snap.now - Date.now();
+    // The server prunes stale (>90s) instances before answering, so everything in a
+    // snapshot is alive *now*. Stamp them with the install time instead of trying to
+    // rebase server-clock heartbeats: keep-alive heartbeats don't bump the pool rev,
+    // so cached timestamps would otherwise age past the staleness cutoff between
+    // snapshots even though the windows are alive. The periodic full sync
+    // (FULL_SYNC_MS) refreshes or removes them long before the 90s filter fires.
+    const installedAt = Date.now();
     this.accounts = new Map(snap.accounts.map((a) => [a.account.uuid, a]));
     this.usage = new Map(Object.entries(snap.usage ?? {}));
     this.instances = (snap.instances ?? []).map((i) => ({
       ...i,
-      heartbeatAt: i.heartbeatAt - skew,
+      heartbeatAt: installedAt,
     }));
     this.cooldownUntilMs = snap.cooldownUntil ?? 0;
     this.poolRev = snap.rev;
     this.needSnapshot = false;
+    this.lastSnapshotAt = installedAt;
     this.markSynced();
   }
 
@@ -115,26 +126,35 @@ export class ServerStore implements SyncStore {
         timeoutMs: Math.max(this.pollMs, 5_000),
       });
       if (res.status !== 200) {
-        this.reachable = false;
+        this.setReachable(false);
         return;
       }
       const rev = (res.json as { rev: number }).rev;
-      if (rev !== this.poolRev || this.needSnapshot) {
+      const presenceDue = Date.now() - this.lastSnapshotAt > FULL_SYNC_MS;
+      if (rev !== this.poolRev || this.needSnapshot || presenceDue) {
         await this.refreshSnapshot();
         this.fireChange();
       } else {
         this.markSynced();
       }
     } catch {
-      this.reachable = false;
+      this.setReachable(false);
     } finally {
       this.polling = false;
     }
   }
 
   private markSynced(): void {
-    this.reachable = true;
+    this.setReachable(true);
     this.lastSyncAt = Date.now();
+  }
+
+  /** Reachability transitions fire the watch, so the UI's ⚠/⇄ indicator stays live. */
+  private setReachable(r: boolean): void {
+    if (this.reachable !== r) {
+      this.reachable = r;
+      this.fireChange();
+    }
   }
 
   private fireChange(): void {

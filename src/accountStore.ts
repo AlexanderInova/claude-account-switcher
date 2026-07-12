@@ -1,6 +1,6 @@
 import { CredentialsManager } from "./credentials";
 import { IdentityManager } from "./identity";
-import { SharedStore } from "./store";
+import { SyncStore } from "./syncStore";
 import { AccountFile, AccountView, InstanceInfo, OAuthAccountInfo, UsageFile, UsageSnapshot } from "./types";
 
 const ACTIVE_MEMO_KEY = "claudeSwitcher.activeMemo";
@@ -33,7 +33,7 @@ export class AccountStore {
   private lastClaudeJsonMtime = -1;
 
   constructor(
-    private readonly store: SharedStore | null,
+    private readonly store: SyncStore | null,
     private readonly credentials: CredentialsManager,
     private readonly identity: IdentityManager,
     private readonly memento: KeyValueStore,

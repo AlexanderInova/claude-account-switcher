@@ -3,8 +3,8 @@ import * as vscode from "vscode";
 import { AccountStore, KeyValueStore } from "./accountStore";
 import { CredentialsManager } from "./credentials";
 import { IdentityManager } from "./identity";
-import { SecretVault, refreshTokenHash } from "./secretVault";
-import { SharedStore } from "./store";
+import { TokenVault, refreshTokenHash } from "./secretVault";
+import { SyncStore } from "./syncStore";
 import { AccountFile, CredentialRef, OAuthAccountInfo, OAuthCreds } from "./types";
 import { usableCredentials } from "./usage";
 
@@ -54,8 +54,8 @@ function newAccountFile(
  */
 export class SwitchService {
   constructor(
-    private readonly store: SharedStore | null,
-    private readonly vault: SecretVault,
+    private readonly store: SyncStore | null,
+    private readonly vault: TokenVault,
     private readonly credentials: CredentialsManager,
     private readonly identity: IdentityManager,
     private readonly accountStore: AccountStore,
@@ -66,7 +66,7 @@ export class SwitchService {
     return {
       ok: false,
       message:
-        "Account switching needs a shared store. Enable it (claudeSwitcher.sync.enabled) or set claudeSwitcher.sync.folder.",
+        "Account switching needs a shared store. Enable claudeSwitcher.sync.enabled and set claudeSwitcher.sync.folder — or, in server mode, run \"Claude: Unlock sync server\".",
     };
   }
 
@@ -102,11 +102,11 @@ export class SwitchService {
     }
     const label = ident?.emailAddress ?? (creds.subscriptionType ? `${creds.subscriptionType} account` : "Current account");
     const order = this.store.listAccounts().length;
-    const created = await this.store.withAccountLock(uuid, () => {
+    const created = await this.store.withAccountLock(uuid, async () => {
       if (this.store!.readAccount(uuid)) {
         return false; // another window registered it first
       }
-      this.store!.writeAccount(newAccountFile(uuid, label, ident, creds, order));
+      await this.store!.writeAccount(newAccountFile(uuid, label, ident, creds, order));
       return true;
     });
     return created === true;
@@ -161,7 +161,7 @@ export class SwitchService {
     await this.vault.put(credId, creds); // secret first (orphan blob on crash is harmless)
 
     const order = this.store.listAccounts().length;
-    const res = await this.store.withAccountLock(uuid, () => {
+    const res = await this.store.withAccountLock(uuid, async () => {
       let file = this.store!.readAccount(uuid);
       if (!file) {
         file = newAccountFile(uuid, label!, ident, creds, order);
@@ -185,7 +185,7 @@ export class SwitchService {
       if (creds.subscriptionType) {
         file.account.subscriptionType = creds.subscriptionType;
       }
-      this.store!.writeAccount(file);
+      await this.store!.writeAccount(file);
       return { dup: false };
     });
 
@@ -293,11 +293,11 @@ export class SwitchService {
     }
 
     // Remove the reference first (crash-safe: the blob still exists for recovery).
-    await store.withAccountLock(uuid, () => {
+    await store.withAccountLock(uuid, async () => {
       const f = store.readAccount(uuid);
       if (f) {
         f.credentials = f.credentials.filter((c) => c.id !== ref.id);
-        store.writeAccount(f);
+        await store.writeAccount(f);
       }
     });
     const pending: PendingDeploy = { credId: ref.id, accountUuid: uuid, hash: ref.refreshTokenHash };
@@ -365,14 +365,14 @@ export class SwitchService {
 
   private async reinsert(uuid: string, ref: CredentialRef): Promise<void> {
     const store = this.store!;
-    await store.withAccountLock(uuid, () => {
+    await store.withAccountLock(uuid, async () => {
       const f = store.readAccount(uuid);
       if (!f) {
         return;
       }
       if (!f.credentials.some((c) => c.id === ref.id || c.refreshTokenHash === ref.refreshTokenHash)) {
         f.credentials.push(ref);
-        store.writeAccount(f);
+        await store.writeAccount(f);
       }
     });
   }
@@ -380,11 +380,11 @@ export class SwitchService {
   /** Removes an orphaned credential reference (its token blob is gone). */
   private async dropRef(uuid: string, credId: string): Promise<void> {
     const store = this.store!;
-    await store.withAccountLock(uuid, () => {
+    await store.withAccountLock(uuid, async () => {
       const f = store.readAccount(uuid);
       if (f) {
         f.credentials = f.credentials.filter((c) => c.id !== credId);
-        store.writeAccount(f);
+        await store.writeAccount(f);
       }
     });
     this.accountStore.reload(Date.now());
@@ -396,11 +396,11 @@ export class SwitchService {
     if (!this.store) {
       return;
     }
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const f = this.store!.readAccount(uuid);
       if (f) {
         f.account.label = label;
-        this.store!.writeAccount(f);
+        await this.store!.writeAccount(f);
       }
     });
     this.accountStore.reload(Date.now());
@@ -416,7 +416,7 @@ export class SwitchService {
         await this.vault.remove(c.id);
       }
     }
-    this.store.deleteAccount(uuid);
+    await this.store.deleteAccount(uuid);
     if (this.accountStore.activeAccountUuid() === uuid) {
       await this.accountStore.clearActive();
     }
@@ -442,7 +442,7 @@ export class SwitchService {
     const file = this.store.readAccount(uuid);
     const label = file?.account.label ?? uuid;
     if (file && file.credentials.length === 0) {
-      this.store.deleteAccount(uuid);
+      await this.store.deleteAccount(uuid);
     }
     this.accountStore.reload(Date.now());
     return {
@@ -464,7 +464,7 @@ export class SwitchService {
     const label = this.store.readAccount(uuid)?.account.label ?? uuid;
     const only = credIds ? new Set(credIds) : undefined;
     let ids: string[] = [];
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const f = this.store!.readAccount(uuid);
       if (!f) {
         return;
@@ -475,7 +475,7 @@ export class SwitchService {
       if (f.credentials.length === 0 && f.account.suspended?.reason === "invalid-grant") {
         f.account.suspended = undefined;
       }
-      this.store!.writeAccount(f);
+      await this.store!.writeAccount(f);
     });
     // Refs are cleared first, so no poller will lease a vanishing blob.
     for (const id of ids) {
@@ -490,12 +490,12 @@ export class SwitchService {
       return true;
     }
     let enabled = true;
-    await this.store.withAccountLock(uuid, () => {
+    await this.store.withAccountLock(uuid, async () => {
       const f = this.store!.readAccount(uuid);
       if (f) {
         f.account.updatesEnabled = !f.account.updatesEnabled;
         enabled = f.account.updatesEnabled;
-        this.store!.writeAccount(f);
+        await this.store!.writeAccount(f);
       }
     });
     this.accountStore.reload(Date.now());

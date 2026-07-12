@@ -8,12 +8,19 @@ import { CredentialsManager } from "./credentials";
 import { claudeJsonPathFrom, IdentityManager } from "./identity";
 import { migrateIfNeeded } from "./migrate";
 import { TokenRefresher } from "./oauth";
-import { refreshTokenHash, SecretVault } from "./secretVault";
+import { refreshTokenHash, SecretVault, TokenVault } from "./secretVault";
+import { folderHasAccounts, migrateFolderToServer, readMigratedMarker, writeMigratedMarker } from "./serverSync/migrateFolder";
+import { RemoteVault } from "./serverSync/remoteVault";
+import { RotationRecovery } from "./serverSync/rotationRecovery";
+import { ServerStore } from "./serverSync/serverStore";
+import { clearSession, loadSession, saveSession, unlock } from "./serverSync/session";
+import { SyncHttp } from "./serverSync/http";
 import { SharedStore } from "./store";
 import { SwitchService } from "./switchService";
+import { SyncStore } from "./syncStore";
 import { fmtAgo, fmtExpiry } from "./timeFmt";
 import { AccountView, CredentialRef } from "./types";
-import { AccountsViewProvider } from "./ui/accountsView";
+import { AccountsViewProvider, SyncUiStatus } from "./ui/accountsView";
 import { StatusBarController } from "./ui/statusBar";
 import { UsagePoller, usableCredentials } from "./usage";
 
@@ -51,24 +58,80 @@ function resolveStoreDir(credentials: CredentialsManager): string | null {
   return path.join(path.dirname(credentials.getCredentialsPath()), "account-switcher");
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const credentials = new CredentialsManager();
   const identity = new IdentityManager(() => claudeJsonPathFrom(credentials.getCredentialsPath()));
-  const vault = new SecretVault(context.secrets);
+  const localVault = new SecretVault(context.secrets);
   const refresher = new TokenRefresher();
   const instanceId = crypto.randomUUID();
+  const cfg = () => vscode.workspace.getConfiguration("claudeSwitcher");
 
-  let store: SharedStore | null = null;
-  const dir = resolveStoreDir(credentials);
-  if (dir) {
-    try {
-      const s = new SharedStore(dir);
-      s.ensureLayout();
-      store = s;
-    } catch {
-      store = null; // directory not writable — degrade to local-only mode
+  const syncMode: "folder" | "server" =
+    cfg().get<string>("sync.mode", "folder") === "server" ? "server" : "folder";
+  const serverUrl = cfg().get<string>("sync.server.url", "").trim().replace(/\/+$/, "");
+  const serverUser = cfg().get<string>("sync.server.user", "").trim();
+
+  let store: SyncStore | null = null;
+  let vault: TokenVault = localVault;
+  let recovery = RotationRecovery.noop();
+  let serverStore: ServerStore | null = null;
+  let serverLocked = false; // server mode without usable keys (never unlocked / 401'd)
+  let lockDetail = "";
+  let migratedBlock: string | null = null; // folder mode blocked by a .migrated marker
+  let onAuthFailed: () => void = () => {}; // assigned once refreshUI exists
+
+  // The folder path is resolved in every mode: folder mode stores in it, server
+  // mode uses it to detect a not-yet-migrated folder and offer the upload.
+  const folderDir = resolveStoreDir(credentials);
+
+  if (syncMode === "server") {
+    if (!serverUrl || !serverUser) {
+      serverLocked = true;
+      lockDetail = "Set claudeSwitcher.sync.server.url and sync.server.user, then unlock.";
+    } else {
+      const session = await loadSession(context.secrets);
+      if (!session || session.url !== serverUrl || session.userId !== serverUser) {
+        serverLocked = true;
+        lockDetail = `Run "Claude: Unlock sync server" to enter the passphrase for ${serverUser}.`;
+      } else {
+        const http = new SyncHttp(serverUrl, serverUser, session.authKeyHex, () => {
+          serverLocked = true;
+          lockDetail = "The server rejected the stored keys (401) — unlock again.";
+          onAuthFailed();
+        });
+        const ss = new ServerStore(http, instanceId, `${serverUser} @ ${serverUrl}`);
+        await ss.init(); // never rejects; an unreachable server serves an empty cache + keeps polling
+        serverStore = ss;
+        store = ss;
+        vault = new RemoteVault(http, session.encKeyHex);
+        recovery = new RotationRecovery(context.secrets, context.workspaceState);
+        context.subscriptions.push({ dispose: () => ss.dispose() });
+      }
+    }
+  } else if (folderDir) {
+    const marker = readMigratedMarker(folderDir);
+    if (marker) {
+      // The folder's contents moved to a server; using it again would fork the pool.
+      migratedBlock = marker.serverUrl;
+    } else {
+      try {
+        const s = new SharedStore(folderDir);
+        s.ensureLayout();
+        store = s;
+      } catch {
+        store = null; // directory not writable — degrade to local-only mode
+      }
     }
   }
+
+  const getSyncStatus = (): SyncUiStatus => ({
+    mode: syncMode,
+    locked: syncMode === "server" ? serverLocked : false,
+    lockDetail,
+    unreachable: serverStore ? !serverStore.status().reachable : false,
+    lastSyncAgoMs: serverStore ? Date.now() - serverStore.status().lastSyncAt : undefined,
+    migratedTo: migratedBlock ?? undefined,
+  });
 
   const getWorkspaceName = () =>
     vscode.workspace.name ?? vscode.workspace.workspaceFolders?.[0]?.name ?? "window";
@@ -89,16 +152,30 @@ export function activate(context: vscode.ExtensionContext): void {
     context.workspaceState
   );
   const statusBar = new StatusBarController(accountStore);
-  const viewProvider = new AccountsViewProvider(context.extensionUri, accountStore);
+  const viewProvider = new AccountsViewProvider(context.extensionUri, accountStore, getSyncStatus);
 
   const refreshUI = () => {
     statusBar.refresh();
     viewProvider.refresh();
   };
+  onAuthFailed = () => {
+    refreshUI();
+    void vscode.window
+      .showWarningMessage(
+        "Claude Account Switcher: the sync server rejected the stored keys (wrong passphrase or removed user).",
+        "Unlock…"
+      )
+      .then((c) => {
+        if (c === "Unlock…") {
+          void vscode.commands.executeCommand("claudeSwitcher.serverUnlock");
+        }
+      });
+  };
 
   const poller = new UsagePoller(
     store,
     vault,
+    recovery,
     refresher,
     credentials,
     accountStore,
@@ -117,7 +194,9 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: () => poller.disposeInstance() }
   );
 
-  // Watch the store folder so other instances' changes reflect quickly.
+  // Watch the store so other instances' changes reflect quickly. In server mode the
+  // watch also fires on reachability transitions, so the ⚠/⇄ indicator stays honest
+  // even when no data changed.
   if (store) {
     let debounce: NodeJS.Timeout | undefined;
     const onChange = () => {
@@ -125,7 +204,7 @@ export function activate(context: vscode.ExtensionContext): void {
         clearTimeout(debounce);
       }
       debounce = setTimeout(() => {
-        if (accountStore.reload(Date.now())) {
+        if (accountStore.reload(Date.now()) || syncMode === "server") {
           refreshUI();
         }
       }, 300);
@@ -134,12 +213,63 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push({ dispose: () => watchers.forEach((w) => w.close()) });
   }
 
+  /** Uploads a folder store into the server pool and stamps it with `.migrated`. */
+  async function runFolderMigration(dir: string): Promise<void> {
+    if (!store || !serverStore) {
+      void vscode.window.showWarningMessage(
+        "Migration needs an unlocked sync server (claudeSwitcher.sync.mode = \"server\")."
+      );
+      return;
+    }
+    const marker = readMigratedMarker(dir);
+    if (marker) {
+      void vscode.window.showInformationMessage(
+        `That folder was already migrated to ${marker.serverUrl}. Delete its .migrated file to re-run.`
+      );
+      return;
+    }
+    if (!folderHasAccounts(dir)) {
+      void vscode.window.showInformationMessage(`No accounts found in ${dir}.`);
+      return;
+    }
+    const go = await vscode.window.showInformationMessage(
+      `Upload the folder store at ${dir} to ${serverUrl} (user ${serverUser})? Parked tokens are end-to-end encrypted before upload; afterwards the folder is marked as migrated so it can't be used accidentally.`,
+      { modal: true },
+      "Upload"
+    );
+    if (go !== "Upload") {
+      return;
+    }
+    try {
+      const summary = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Uploading folder store to the sync server…" },
+        () => migrateFolderToServer(new SharedStore(dir), localVault, store!, vault)
+      );
+      writeMigratedMarker(dir, { migratedAt: Date.now(), serverUrl, userId: serverUser });
+      accountStore.reload(Date.now());
+      refreshUI();
+      const bits = [`${summary.accounts} account${summary.accounts === 1 ? "" : "s"}`, `${summary.credentials} credential${summary.credentials === 1 ? "" : "s"}`];
+      if (summary.skippedDuplicates) bits.push(`${summary.skippedDuplicates} duplicate${summary.skippedDuplicates === 1 ? "" : "s"} skipped`);
+      if (summary.orphanedRefs) bits.push(`${summary.orphanedRefs} orphaned ref${summary.orphanedRefs === 1 ? "" : "s"} ignored`);
+      void vscode.window.showInformationMessage(`Folder migrated: ${bits.join(", ")}. The folder is now marked .migrated.`);
+    } catch (e) {
+      void vscode.window.showErrorMessage(
+        "Migration failed (the folder was NOT marked migrated; re-running is safe): " +
+          (e instanceof Error ? e.message : String(e))
+      );
+    }
+  }
+
   // Startup: migrate, recover an interrupted deploy, render, then poll.
   void (async () => {
     try {
       if (store) {
-        await migrateIfNeeded(context, store, vault, credentials, identity);
+        if (syncMode === "folder") {
+          await migrateIfNeeded(context, store, localVault, credentials, identity);
+        }
         await switchService.recoverPendingDeploy();
+        // Rotated tokens journaled before a crash/outage are pushed before polling starts.
+        await recovery.retryPending(vault);
         await switchService.ensureLocalAccountRegistered();
       }
     } catch (e) {
@@ -149,13 +279,51 @@ export function activate(context: vscode.ExtensionContext): void {
     accountStore.recomputeActive();
     refreshUI();
     poller.start();
+
+    if (migratedBlock) {
+      void vscode.window
+        .showWarningMessage(
+          `The shared folder ${folderDir} was migrated to ${migratedBlock} and is retired. Switch claudeSwitcher.sync.mode to "server" (or delete the folder's .migrated file to reactivate it).`,
+          "Open settings"
+        )
+        .then((c) => {
+          if (c === "Open settings") {
+            void vscode.commands.executeCommand("workbench.action.openSettings", "claudeSwitcher.sync");
+          }
+        });
+    }
+
+    // Server mode + a local folder that still holds parked accounts → offer the upload.
+    if (syncMode === "server" && store && folderDir && !readMigratedMarker(folderDir) && folderHasAccounts(folderDir)) {
+      void vscode.window
+        .showInformationMessage(
+          `Found a local shared folder with parked accounts (${folderDir}). Upload it to the sync server?`,
+          "Upload",
+          "Not now"
+        )
+        .then((c) => {
+          if (c === "Upload") {
+            void runFolderMigration(folderDir);
+          }
+        });
+    }
   })();
 
   // --- Commands ---
 
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.addCurrentAccount", async () => {
-      const res = await switchService.park();
+      let res;
+      try {
+        res = await switchService.park();
+      } catch (e) {
+        // E.g. the sync server went away mid-write — nothing was lost, tell the user.
+        void vscode.window.showErrorMessage(
+          "Parking failed: " + (e instanceof Error ? e.message : String(e))
+        );
+        refreshUI();
+        return;
+      }
       if (!res.ok) {
         vscode.window.showWarningMessage(res.message);
         refreshUI();
@@ -209,10 +377,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.refreshUsage", async (id?: string) => {
-      if (id) {
-        await poller.refreshAccount(id);
-      } else {
-        await poller.refreshAll();
+      try {
+        if (id) {
+          await poller.refreshAccount(id);
+        } else {
+          await poller.refreshAll();
+        }
+      } catch (e) {
+        void vscode.window.showWarningMessage(
+          "Refresh failed: " + (e instanceof Error ? e.message : String(e))
+        );
       }
       refreshUI();
     })
@@ -393,6 +567,113 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
+  // --- sync-server session commands ---
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("claudeSwitcher.serverUnlock", async () => {
+      const url = cfg().get<string>("sync.server.url", "").trim().replace(/\/+$/, "");
+      const user = cfg().get<string>("sync.server.user", "").trim();
+      if (!url || !user) {
+        const c = await vscode.window.showWarningMessage(
+          "Set claudeSwitcher.sync.server.url and claudeSwitcher.sync.server.user first.",
+          "Open settings"
+        );
+        if (c === "Open settings") {
+          void vscode.commands.executeCommand("workbench.action.openSettings", "claudeSwitcher.sync.server");
+        }
+        return;
+      }
+      const pass = await vscode.window.showInputBox({
+        title: `Unlock sync server — ${user}`,
+        prompt: `Passphrase for ${user} @ ${url} (never stored; only derived keys are kept)`,
+        password: true,
+        ignoreFocusOut: true,
+      });
+      if (!pass) {
+        return;
+      }
+      let res = await unlock(url, user, pass);
+      if (!res.ok && res.needsRegistration) {
+        const reg = await vscode.window.showInformationMessage(
+          `"${user}" is not registered on ${url}. Register now? The passphrase you just entered becomes this user's key — losing it means losing access to the synced credentials.`,
+          { modal: true },
+          "Register"
+        );
+        if (reg !== "Register") {
+          return;
+        }
+        res = await unlock(url, user, pass, { register: true });
+        if (!res.ok && res.needsToken) {
+          const token = await vscode.window.showInputBox({
+            title: "Registration token",
+            prompt: "This server requires a registration token (its CAS_REGISTRATION_TOKEN)",
+            password: true,
+            ignoreFocusOut: true,
+          });
+          if (!token) {
+            return;
+          }
+          res = await unlock(url, user, pass, { register: true, registrationToken: token });
+        }
+      }
+      if (!res.ok) {
+        void vscode.window.showErrorMessage("Sync server unlock failed: " + res.error);
+        return;
+      }
+      await saveSession(context.secrets, res.session);
+      const note = res.registered ? `Registered and unlocked "${user}".` : `Unlocked "${user}".`;
+      if (syncMode !== "server") {
+        const c = await vscode.window.showInformationMessage(
+          `${note} Set claudeSwitcher.sync.mode to "server" to use it.`,
+          "Open settings"
+        );
+        if (c === "Open settings") {
+          void vscode.commands.executeCommand("workbench.action.openSettings", "claudeSwitcher.sync.mode");
+        }
+        return;
+      }
+      const c = await vscode.window.showInformationMessage(`${note} Reload the window to connect.`, "Reload window");
+      if (c === "Reload window") {
+        void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("claudeSwitcher.serverLock", async () => {
+      await clearSession(context.secrets);
+      const c = await vscode.window.showInformationMessage(
+        "Sync server keys forgotten on this machine. Reload the window to disconnect.",
+        "Reload window"
+      );
+      if (c === "Reload window") {
+        void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand("claudeSwitcher.migrateToServer", async (dirArg?: string) => {
+      if (syncMode !== "server" || !serverStore) {
+        void vscode.window.showWarningMessage(
+          'Migration needs an unlocked sync server: set claudeSwitcher.sync.mode to "server" and run "Claude: Unlock sync server" first.'
+        );
+        return;
+      }
+      const dir = dirArg ?? (await vscode.window.showInputBox({
+        title: "Migrate folder store to sync server",
+        prompt: "Path of the shared folder to upload",
+        value: folderDir ?? "",
+        ignoreFocusOut: true,
+        validateInput: (v) => (fs.existsSync(v.trim()) ? undefined : "Folder not found"),
+      }));
+      if (!dir) {
+        return;
+      }
+      await runFolderMigration(realpathSafe(dir.trim()));
+    })
+  );
+
   context.subscriptions.push(
     vscode.commands.registerCommand("claudeSwitcher.undoSwitch", async () => {
       const res = await switchService.undoSwitch();
@@ -496,6 +777,9 @@ export function activate(context: vscode.ExtensionContext): void {
       if (
         e.affectsConfiguration("claudeSwitcher.sync.enabled") ||
         e.affectsConfiguration("claudeSwitcher.sync.folder") ||
+        e.affectsConfiguration("claudeSwitcher.sync.mode") ||
+        e.affectsConfiguration("claudeSwitcher.sync.server.url") ||
+        e.affectsConfiguration("claudeSwitcher.sync.server.user") ||
         e.affectsConfiguration("claudeSwitcher.credentialsPath")
       ) {
         void vscode.window.showInformationMessage(
@@ -572,7 +856,7 @@ interface CredPick extends vscode.QuickPickItem {
  * used to fetch usage, its expiry, and whether its token is present in the shared secret
  * store (an instant local check — not a network probe).
  */
-async function credItems(vault: SecretVault, refs: CredentialRef[]): Promise<CredPick[]> {
+async function credItems(vault: TokenVault, refs: CredentialRef[]): Promise<CredPick[]> {
   const now = Date.now();
   return Promise.all(
     refs.map(async (ref) => {
@@ -602,8 +886,8 @@ async function credItems(vault: SecretVault, refs: CredentialRef[]): Promise<Cre
  * default pick (no candidates), or `null` if the user cancelled the chooser.
  */
 async function pickCredentialToDeploy(
-  store: SharedStore,
-  vault: SecretVault,
+  store: SyncStore,
+  vault: TokenVault,
   uuid: string,
   label: string
 ): Promise<string | undefined | null> {
@@ -633,8 +917,8 @@ async function pickCredentialToDeploy(
  * or `null` if the user cancelled or ticked nothing.
  */
 async function pickCredentialsToDelete(
-  store: SharedStore,
-  vault: SecretVault,
+  store: SyncStore,
+  vault: TokenVault,
   uuid: string,
   label: string
 ): Promise<string[] | null> {
